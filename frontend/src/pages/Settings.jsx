@@ -5,8 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Settings as SettingsIcon, Save, Plug, RefreshCw, Warehouse, Clock, Timer } from "lucide-react";
+import { Settings as SettingsIcon, Save, Plug, RefreshCw, Warehouse, Clock, Timer, Zap, Unplug, ExternalLink, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
+import { useSearchParams } from "react-router-dom";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -15,9 +16,14 @@ export default function Settings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [testingLs, setTestingLs] = useState(false);
   const [warehouses, setWarehouses] = useState([]);
   const [schedulerStatus, setSchedulerStatus] = useState(null);
   const [odooForm, setOdooForm] = useState({ odoo_url: "", odoo_db: "", odoo_username: "", odoo_api_key: "" });
+  const [lsForm, setLsForm] = useState({ lightspeed_store_id: "", lightspeed_secret_token: "", lightspeed_client_id: "", lightspeed_client_secret: "" });
+  const [lsOAuthConnected, setLsOAuthConnected] = useState(false);
+  const [disconnectingLs, setDisconnectingLs] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [syncForm, setSyncForm] = useState({ sync_products_interval_hours: 24, sync_inventory_interval_minutes: 30, sync_pricing_interval_hours: 12, auto_sync_enabled: false, auto_push_to_odoo: false });
   const [warehouseForm, setWarehouseForm] = useState({ preferred_warehouse: "" });
   const [pricingForm, setPricingForm] = useState({ markup_percentage: 40, default_warehouse: "Main Warehouse" });
@@ -53,6 +59,13 @@ export default function Settings() {
         markup_percentage: res.data.markup_percentage || 40,
         default_warehouse: res.data.default_warehouse || "Main Warehouse",
       });
+      setLsForm({
+        lightspeed_store_id: res.data.lightspeed_store_id || "",
+        lightspeed_secret_token: res.data.lightspeed_secret_token === "***" ? "" : (res.data.lightspeed_secret_token || ""),
+        lightspeed_client_id: res.data.lightspeed_client_id || "",
+        lightspeed_client_secret: res.data.lightspeed_client_secret === "***" ? "" : (res.data.lightspeed_client_secret || ""),
+      });
+      setLsOAuthConnected(!!res.data.lightspeed_oauth_connected);
     } catch (e) {
       console.error(e);
     } finally {
@@ -63,6 +76,23 @@ export default function Settings() {
   useEffect(() => {
     fetchSettings();
   }, [fetchSettings]);
+
+  // Handle OAuth callback query params
+  useEffect(() => {
+    const lsOauth = searchParams.get('ls_oauth');
+    if (lsOauth === 'success') {
+      toast.success("Lightspeed connected successfully via OAuth!");
+      searchParams.delete('ls_oauth');
+      setSearchParams(searchParams, { replace: true });
+      fetchSettings();
+    } else if (lsOauth === 'error') {
+      const msg = searchParams.get('message') || 'OAuth connection failed';
+      toast.error(`Lightspeed OAuth: ${msg}`);
+      searchParams.delete('ls_oauth');
+      searchParams.delete('message');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams, fetchSettings]);
 
   const saveOdoo = async () => {
     setSaving(true);
@@ -128,6 +158,69 @@ export default function Settings() {
       toast.error("Connection test failed");
     } finally {
       setTesting(false);
+    }
+  };
+
+  const saveLightspeed = async () => {
+    setSaving(true);
+    try {
+      const data = { ...lsForm };
+      if (!data.lightspeed_secret_token) delete data.lightspeed_secret_token;
+      if (!data.lightspeed_client_secret) delete data.lightspeed_client_secret;
+      await axios.put(`${API}/settings`, data);
+      toast.success("Lightspeed settings saved");
+      fetchSettings();
+    } catch (e) {
+      toast.error("Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const connectLightspeedOAuth = async () => {
+    try {
+      // First save the current form to ensure credentials are persisted
+      const data = { ...lsForm };
+      if (!data.lightspeed_secret_token) delete data.lightspeed_secret_token;
+      if (!data.lightspeed_client_secret) delete data.lightspeed_client_secret;
+      await axios.put(`${API}/settings`, data);
+
+      const res = await axios.get(`${API}/lightspeed/oauth/authorize`);
+      if (res.data.authorize_url) {
+        window.location.href = res.data.authorize_url;
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to start OAuth flow");
+    }
+  };
+
+  const disconnectLightspeed = async () => {
+    setDisconnectingLs(true);
+    try {
+      await axios.post(`${API}/lightspeed/oauth/disconnect`);
+      toast.success("Lightspeed disconnected");
+      setLsOAuthConnected(false);
+      fetchSettings();
+    } catch (e) {
+      toast.error("Failed to disconnect");
+    } finally {
+      setDisconnectingLs(false);
+    }
+  };
+
+  const testLightspeed = async () => {
+    setTestingLs(true);
+    try {
+      const res = await axios.post(`${API}/settings/lightspeed/test`);
+      if (res.data.connected) {
+        toast.success(res.data.message);
+      } else {
+        toast.info(res.data.message);
+      }
+    } catch (e) {
+      toast.error("Lightspeed connection test failed");
+    } finally {
+      setTestingLs(false);
     }
   };
 
@@ -212,6 +305,134 @@ export default function Settings() {
           <div className="flex justify-end">
             <Button onClick={saveOdoo} disabled={saving} className="bg-blue-600 hover:bg-blue-500 text-white rounded-none" data-testid="save-odoo-btn">
               <Save className="w-4 h-4 mr-2" />Save Odoo Settings
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Lightspeed Retail (X-Series) Connection */}
+      <Card className="bg-zinc-900/50 border-zinc-800 rounded-sm">
+        <CardHeader className="p-4 border-b border-zinc-800/50 flex flex-row items-center justify-between">
+          <div className="flex items-center gap-3">
+            <CardTitle className="font-heading text-sm font-bold uppercase text-zinc-400 tracking-wider">Lightspeed Retail (X-Series) Connection</CardTitle>
+            {lsOAuthConnected && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-mono bg-emerald-950/50 text-emerald-400 border border-emerald-800 rounded-none">
+                <CheckCircle2 className="w-3 h-3" /> OAuth Connected
+              </span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            {lsOAuthConnected && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={disconnectLightspeed}
+                disabled={disconnectingLs}
+                className="rounded-none border-red-800 text-red-400 hover:bg-red-950"
+                data-testid="disconnect-lightspeed-btn"
+              >
+                <Unplug className="w-3 h-3 mr-1" />
+                Disconnect
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={testLightspeed}
+              disabled={testingLs}
+              className="rounded-none border-zinc-700 text-zinc-300"
+              data-testid="test-lightspeed-btn"
+            >
+              {testingLs ? <RefreshCw className="w-3 h-3 animate-spin mr-1" /> : <Zap className="w-3 h-3 mr-1" />}
+              Test Connection
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="p-4 space-y-4">
+          <p className="text-xs text-zinc-500">Connect to your Lightspeed Retail (X-Series) store. Use <strong>OAuth (Private App)</strong> for accounts created after Jan 2026, or <strong>Personal Token</strong> for older Plus plan accounts.</p>
+
+          {/* Domain Prefix — always required */}
+          <div>
+            <label className="text-xs text-zinc-500 mb-1 block">Domain Prefix</label>
+            <Input
+              value={lsForm.lightspeed_store_id}
+              onChange={(e) => setLsForm({ ...lsForm, lightspeed_store_id: e.target.value })}
+              placeholder="e.g. mystore"
+              className="bg-zinc-950 border-zinc-800 rounded-none font-mono text-sm max-w-md"
+              data-testid="ls-store-id-input"
+            />
+            <p className="text-xs text-zinc-600 mt-1">From https://<span className="text-zinc-400">[prefix]</span>.retail.lightspeed.app</p>
+          </div>
+
+          {/* OAuth (Private App) Section */}
+          <div className="border border-zinc-800 p-4 space-y-3">
+            <div className="flex items-center gap-2 mb-1">
+              <ExternalLink className="w-4 h-4 text-emerald-400" />
+              <span className="text-xs font-mono text-emerald-400 uppercase tracking-wider font-bold">OAuth 2.0 (Private App)</span>
+              <span className="text-xs text-zinc-600 ml-2">Recommended for new accounts</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs text-zinc-500 mb-1 block">Client ID (Public Key)</label>
+                <Input
+                  value={lsForm.lightspeed_client_id}
+                  onChange={(e) => setLsForm({ ...lsForm, lightspeed_client_id: e.target.value })}
+                  placeholder="public_..."
+                  className="bg-zinc-950 border-zinc-800 rounded-none font-mono text-sm"
+                  data-testid="ls-client-id-input"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-zinc-500 mb-1 block">Client Secret (Secret Key)</label>
+                <Input
+                  type="password"
+                  value={lsForm.lightspeed_client_secret}
+                  onChange={(e) => setLsForm({ ...lsForm, lightspeed_client_secret: e.target.value })}
+                  placeholder="secret_..."
+                  className="bg-zinc-950 border-zinc-800 rounded-none font-mono text-sm"
+                  data-testid="ls-client-secret-input"
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <Button
+                onClick={connectLightspeedOAuth}
+                disabled={!lsForm.lightspeed_store_id || !lsForm.lightspeed_client_id || !lsForm.lightspeed_client_secret}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-none"
+                data-testid="connect-lightspeed-oauth-btn"
+              >
+                <ExternalLink className="w-4 h-4 mr-2" />
+                {lsOAuthConnected ? "Reconnect to Lightspeed" : "Connect to Lightspeed"}
+              </Button>
+              {!lsOAuthConnected && lsForm.lightspeed_client_id && (
+                <span className="text-xs text-zinc-500">Saves credentials, then redirects you to Lightspeed to authorize</span>
+              )}
+            </div>
+          </div>
+
+          {/* Personal Token (Legacy) */}
+          <div className="border border-zinc-800/50 p-4 space-y-3">
+            <div className="flex items-center gap-2 mb-1">
+              <Zap className="w-4 h-4 text-zinc-500" />
+              <span className="text-xs font-mono text-zinc-500 uppercase tracking-wider font-bold">Personal Token (Legacy)</span>
+              <span className="text-xs text-zinc-600 ml-2">For Plus plan accounts only</span>
+            </div>
+            <div>
+              <label className="text-xs text-zinc-500 mb-1 block">Personal Token</label>
+              <Input
+                type="password"
+                value={lsForm.lightspeed_secret_token}
+                onChange={(e) => setLsForm({ ...lsForm, lightspeed_secret_token: e.target.value })}
+                placeholder="Enter personal token"
+                className="bg-zinc-950 border-zinc-800 rounded-none font-mono text-sm max-w-md"
+                data-testid="ls-secret-token-input"
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <Button onClick={saveLightspeed} disabled={saving} className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-none" data-testid="save-lightspeed-btn">
+              <Save className="w-4 h-4 mr-2" />Save Lightspeed Settings
             </Button>
           </div>
         </CardContent>

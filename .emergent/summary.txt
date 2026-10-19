@@ -1,156 +1,162 @@
 <analysis>**original_problem_statement**: 
-Build a middleware application that integrates supplier product data using the PromoStandards API and synchronizes selected products into Odoo ERP. The system acts as a staging layer, pulling data from multiple suppliers via SOAP/BulkData APIs, allowing an admin to curate products, and then pushing them to Odoo via XML-RPC.
+Build a middleware application that integrates supplier product data using the PromoStandards API and synchronizes selected products into destination platforms. 
 
 **PRODUCT REQUIREMENTS:**
 - Connect to suppliers via PromoStandards SOAP APIs and BulkData API.
 - Staging Database: PostgreSQL for normalizing product/variant/media data.
-- Admin UI: React dashboard for viewing, filtering, deleting, and selecting products.
-- Odoo Integration: Push selected products, variants, inventory, and images to Odoo.
-- User Management: Full CRUD for admin users.
+- Sync Engine: Background automated syncing via APScheduler.
+- Multi-Platform Destination: Push selected products, categories, and inventory to either Odoo or Lightspeed Retail X-Series.
+- Admin UI: React dashboard for viewing, mapping categories, selecting destination platforms, managing syncs, and real-time progress tracking.
 
 **User's preferred language**: English (INSTRUCT next agent to respond in English only)
 
 **what currently exists?** 
-A full-stack application (FastAPI + React + PostgreSQL) that successfully bridges PromoStandards suppliers to Odoo. It features complete Odoo synchronization (products, variants, correct cost/sale prices, inventory levels, and images). It includes a newly added BulkData API integration for mass product/image downloading. The UI has a dashboard with analytics (Recharts), supplier management, category mapping, product pre-processing, and user management.
+A fully decomposed, multi-platform full-stack application (FastAPI + React + PostgreSQL). It successfully syncs PromoStandards product data into a staging DB via background jobs, allows users to map categories, and pushes data to either Odoo or Lightspeed Retail X-Series. The frontend includes a real-time progress tracker for sync jobs. 
 
 **Last working item**: 
-- **Last item agent was working**: The agent just finished implementing a batch of 10 UI/feature requests from the user. This included: adding  for Dashboard analytics, building a complete User Management CRUD screen, adding bulk-delete checkboxes to the Products list view, adding a  field to Suppliers, and removing unused/old UI elements (Quick Sync, Emergent logos, Odoo push button from sync screen).
-- **Status**: USER VERIFICATION PENDING
-- **Agent Testing Done**: Y (Backend compiled and API health check passed, but visual UI changes haven't been thoroughly screenshot-tested).
-- **Which testing method agent to use?**: Frontend screenshot tool or manual testing to ensure the new Dashboard charts and Users page render correctly.
-- **User Testing Done**: N
+    - **Last item agent was working**: Fixing a 500 Internal Server Error when creating a new supplier. The root cause was the PostgreSQL container service repeatedly stopping in the environment. The agent implemented a bash script  inside the FastAPI  event to automatically boot the database before the application accepts connections.
+    - **Status**: RESOLVED
+    - **Agent Testing Done**: Y
+    - **Which testing method agent to use?**: testing agent v3
+    - **User Testing Done**: N
 
-**All Pending/In progress Issue list**:
-  Issue 1: Supplier API & Image Downloads are blocked by CAPTCHA/CloudFront (P0 - EXTERNAL BLOCKER)
-  Issue 2: Athletic Knit Integration failing (P1 - EXTERNAL BLOCKER)
-  Issue 3: PostgreSQL service is not persistent in the preview environment (P1 - ENVIRONMENT ISSUE)
+**All Pending/In progress Issue list**:  
+  Issue 1: Supplier API & Image Downloads blocked by CAPTCHA (SanMar) (P1 - EXTERNAL BLOCKER)
+  Issue 2: Athletic Knit Integration failing with 503/105 errors (P1 - EXTERNAL BLOCKER)
 
-  **Issues Detail:**
-  - **Issue 1: Supplier API & Image Downloads blocked**
-     - **Attempted fixes:** Agent verified that requests to SanMar's CDN () and standard SOAP endpoints return HTTP 403 / CAPTCHA HTML. Added error handling to gracefully skip blocked images.
-     - **Next debug checklist:** Do not debug code for this. This requires the user to contact SanMar and have the server's IP address whitelisted. 
-     - **Why fix this issue and what will be achieved with the fix?** Unblocks actual production image downloads and live syncing.
-     - **Status:** BLOCKED
-     - **Is recurring issue?** Y
-     - **Should Test frontend/backend/both after fix?** backend
-     - **Blocked on other issue:** User action required (IP Whitelisting).
+  Issues Detail:
+  - Issue 1: 
+     - Attempted fixes: Investigated by previous agents; SanMar's CDN blocks the preview environment IP.
+     - Next debug checklist: Do not debug. Requires user to whitelist server IP with SanMar.
+     - Why fix this issue and what will be achieved with the fix? Fixes image downloads for SanMar.
+     - Status: BLOCKED
+     - Is recurring issue? Y
+     - Should Test frontend/backend/both after fix? Backend
+     - Blocked on other issue: User action required.
 
-  - **Issue 2: Athletic Knit Integration failing**
-     - **Attempted fixes:** Tried connecting to , , and . Endpoints return either 503 (Service Unavailable) or 105 (Authentication Credentials failed) with the user's provided credentials.
-     - **Next debug checklist:** Await confirmation from the user regarding the exact endpoint URL and active status of Athletic Knit's API.
-     - **Why fix this issue and what will be achieved with the fix?** Adds the requested secondary supplier.
-     - **Status:** BLOCKED
-     - **Is recurring issue?** N
-     - **Should Test frontend/backend/both after fix?** backend
-     - **Blocked on other issue:** User action required (Clarification from Supplier).
-
-  - **Issue 3: PostgreSQL service is not persistent**
-     - **Attempted fixes:** Agent has had to reinstall/restart postgresql and initialize schemas multiple times. 
-     - **Next debug checklist:** This is a platform preview limitation. Always check if PG is running upon startup; if data is wiped, recreate admin user and test suppliers via API/UI to continue development.
-     - **Why fix this issue and what will be achieved with the fix?** Prevents data loss between forks.
-     - **Status:** BLOCKED
-     - **Is recurring issue?** Y
-     - **Should Test frontend/backend/both after fix?** NA
-     - **Blocked on other issue:** Platform limitation.
+  - Issue 2: 
+     - Attempted fixes: Investigated previously; supplier endpoints return HTTP 503.
+     - Next debug checklist: Await user clarification from the supplier. Do not debug.
+     - Why fix this issue and what will be achieved with the fix? Enables Athletic Knit syncing.
+     - Status: BLOCKED
+     - Is recurring issue? Y
+     - Should Test frontend/backend/both after fix? Backend
+     - Blocked on other issue: User action required.
 
 **In progress Task List**:
-  - No active coding tasks in progress. The 10-point UI request was completely written, just needs visual verification.
+ None. All active tasks were completed.
 
 **Upcoming and Future Tasks**
-  - (P1) Implement automated background Sync Jobs (e.g., using ).
-  - (P1) Add an automated push to Odoo trigger that fires immediately after a successful BulkData sync completes.
-  - (P2) Implement an image retry mechanism for failed downloads.
-  - (P2) Refactor . It is currently a monolith of over 2800 lines. Break it down using FastAPI  (e.g., , , ).
+  - P1: **Live Product Push Testing**: Test the actual pushing of products to Lightspeed X-Series using the user's real  and  (User requested this setup, but real credentials need to be inputted via the UI).
+  - P2: **Image Retry Queue**: Add automatic retry logic for supplier image downloads that fail due to CDN timeouts or temporary errors.
+  - P3: **Sync Scheduling Dashboard**: Show upcoming auto-sync jobs in a calendar view so users can plan around scheduled batch operations.
 
 **Completed work in this session**
-- **Odoo Sync Completed:** Fixed standard/cost price assignment to variants, corrected Odoo 16 inventory  creation, and fixed  upload logic. 
-- **BulkData API Implementation:** Created parser and endpoint to ingest massive XML dumps from PromoStandards BulkData v1.0. Added UI button for triggering.
-- **Frontend Dashboard Revamp:** Removed Quick Sync All and Recent Activity. Installed  and added 3 charts (Products by Category, Brand, Supplier).
-- **Products UI Enhancements:** Added checkbox selection in List View and a Bulk Delete endpoint/button.
-- **Users Management:** Created full CRUD frontend page () and backend endpoints ().
-- **Supplier Settings Update:** Added  field to DB schema and frontend form.
-- **UI Cleanup:** Removed Emergent logos/text globally. Removed Push to Odoo from the sync management screen.
+- Migrated Lightspeed Integration from Ecwid API to Lightspeed Retail X-Series API (Auth: Domain Prefix + Personal Token). (DONE)
+- Fixed Lightspeed 400 Bad Request bugs by correcting the API Base URL to . (DONE)
+- Decomposed monolithic 3300-line  into 11 modular FastAPI APIRouter files inside . (DONE)
+- Fixed DB pool dependency injection bug caused by the decomposition. (DONE)
+- Implemented a Real-time Sync Progress Tracker UI on the Sync Management page using . (DONE)
+- Fixed recurring PostgreSQL service crashes by adding an  boot check inside  startup. (DONE)
 
 **Earlier issues found/mentioned but not fixed**
-  - None (All actionable user feedback was addressed, remaining issues are external blockers).
+   - None, besides the external API blockers (SanMar/Athletic Knit).
 
 **Known issue recurrence from previous fork**
-  - Issue recurrence in previous fork: PostgreSQL DB wiping on restart & External IP blocking (SanMar CAPTCHA).
-  - Recurrence count: 2
-  - Status: BLOCKED
+  - Issue recurrence in previous fork: PostgreSQL DB service dying randomly.
+  - Recurrence count: 4
+  - Status: RESOLVED (Mitigated via programmatic restart check on backend startup).
 
 **Code Architecture**
-
+/app/
+├── backend/
+│   ├── routes/              # Decomposed FastAPI Routers
+│   │   ├── auth.py, categories.py, dashboard.py, lightspeed.py, media.py
+│   │   ├── odoo.py, preprocessing.py, products.py, settings.py, suppliers.py, sync.py
+│   ├── deps.py              # Shared dependencies (DB pool, get_current_user)
+│   ├── models.py            # Pydantic models
+│   ├── server.py            # Slim entrypoint (Startup, CORS, Router Includes)
+│   ├── scheduler.py         # APScheduler configuration
+│   ├── promostandards.py    # SOAP & BulkData XML connector
+│   ├── odoo_service.py      # Odoo XML-RPC integration
+│   └── lightspeed_service.py # Lightspeed Retail X-Series API integration
+├── frontend/
+│   └── src/
+│       └── pages/
+│           ├── Settings.jsx         # Uses Domain Prefix & Personal Token
+│           ├── SyncManagement.jsx   # Contains real-time progress tracker UI
+│           ├── Suppliers.jsx        
+│           ├── Products.jsx         
+│           └── CategoryMapping.jsx  
+└── memory/PRD.md
 
 **Key Technical Concepts**
-- Backend: Python FastAPI, PostgreSQL ().
-- Frontend: React, Tailwind CSS, shadcn/ui, Recharts.
-- External APIs: PromoStandards SOAP (manual XML parsing to avoid WSDL overhead), PromoStandards BulkData (large XML payloads), Odoo XML-RPC.
+Backend: Python FastAPI, PostgreSQL (), APScheduler.
+Frontend: React, Tailwind CSS, shadcn/ui.
+External Integrations: PromoStandards SOAP/BulkData, Odoo XML-RPC, Lightspeed Retail X-Series API (OAuth2/Bearer).
 
 **key DB schema**
-- **suppliers**: added  column.
-- **product_media**: added  column to store downloaded images for Odoo injection.
-- **products**: uid=0(root) gid=0(root) groups=0(root), , , , , , .
-- **product_variants**: links to products, stores size/color/inventory/price.
+  - : {domain_prefix, personal_token, odoo_url, odoo_db, auto_sync_enabled}
+  - : {supplier_id, supplier_sku, lightspeed_sync_status, selected_for_lightspeed}
+  - : {supplier_category, odoo_category_id, lightspeed_category_id}
+  - : {supplier_name, api_base_url, endpoint_type, ...}
 
 **changes in tech stack**
-- Added  to frontend for dashboard analytics.
+  - Architectural shift: FastAPI backend is now fully decomposed using . The DB connection pool is stored in . Use  inside routes.
 
 **All files of reference**
-- : Houses all new endpoints (, , ).
-- : Houses the new  parsing logic.
-- : Rebuilt entirely to accommodate Recharts.
-- : Newly created for user management.
-- : Modified for list-view checkboxes.
+  - : Slimmed down. Contains the critical  startup hook.
+  - : Contains the  reference and  auth dependency.
+  - : Completely rewritten to use X-Series API.
+  - : Updated with real-time polling tracker.
+  - : Updated fields for Lightspeed configuration.
 
 **Areas that need refactoring**:
--  is critically large and needs routing decomposition for future maintainability.
+  - The backend was successfully refactored in this session and is in excellent modular shape.
 
 **key api endpoints**
-- : Returns aggregated data for Recharts.
-- : Triggers the PromoStandards BulkData pull.
-- : Deletes selected products arrays.
-- : Standard CRUD for admin users.
+  - : Trigger full batch sync.
+  - : Poll for sync progress.
+  - : Validates X-Series connection.
 
 **Critical Info for New Agent**
-- **DO NOT SPEND TIME DEBUGGING SANMAR 403 / CAPTCHA ERRORS.** This is a known CloudFront firewall restriction requiring the user to whitelist the server IP.
-- **DB Volatility:** When you start, the Postgres database will be empty. You will need to recreate the  user, setup the Odoo credentials, and create a Supplier to test anything.
-- **Testing Data:** Use Sandbox credentials to test BulkData without hitting 24hr rate limits: Account: , Password: .
-- **Supplier Validation Note:** The Test Connection button on the Supplier page will likely show as Failed for production SanMar credentials simply because of the aforementioned IP block. The code itself works perfectly.
+  - **Lightspeed API Correctness**: The integration uses **Lightspeed Retail X-Series API**, *not* Ecwid. Base URL is . Auth is a Bearer Token using the  field. **DO NOT revert to Ecwid endpoints.**
+  - **Backend Routing**:  is no longer a monolith. To add or modify endpoints, go to the corresponding file in . 
+  - **Database Pool**: When writing DB queries in routes, import  from  () and use . Do not initialize separate pools.
+  - **PostgreSQL Stability**: A script dynamically starts Postgres if it's down. If DB errors occur unexpectedly, run  in bash to confirm the service is alive.
 
 **documents and test reports created in this job**
--  (Updated with BulkData features and credential adjustments).
+  - 
+  - 
+  - 
+  - 
+  - 
 
-**Last 10 User Messages and any pending HUMAN messages**
-- **User:** Provided 10 specific UI/UX modification tasks (Remove Quick Sync, add charts, remove Emergent logos, add Bulk Delete to products, fix supplier test button, add bulk_data_url field, remove push to odoo button, change category mapping text, build Users screen). *(Agent implemented all these in code; visual testing pending)*
-- **User:** What is the Quick Sync All butt on the dashboard screen for ?
-- **User:** I redeployed the application on my server. When I did the bulk data sync, I got an error... *(Agent explained how to properly set up the base URL)*
-- **User:** try this https://api.dc-onesource.com/xml/Athleticknit/Product/1.0.0/soap *(Agent tested, resulted in Auth error 105)*
-- **User:** http://www.promostandards.org/WSDL/Inventory/2.0.0/ try this *(Agent explained this is a namespace, not an endpoint)*
-- **User:** any information on API base URL or endpoint URL in this [ZIP uploaded] *(Agent analyzed, found it was just template documentation)*
-- **User:** I have a new supplier named - Athletic Knit... Username:29144 Password :2aYa3j3d... check the promostandards api... *(Agent found their endpoints returning 503 Service Unavailable)*
-- **User:** Corrected production credentials for SanMar. *(Agent saved to PRD)*
-- **User:** Decided to test the actual data sync tomorrow.
+**Last 10 User Messages and any pending HUMAN messages** 
+ 1. User: proceed with the plan (Agent migrated Lightspeed to Ecwid API).
+ 2. User: Api calls to lightspeed are failing with error code 400. try this as the API URL https://{DOMAIN_PREFIX}.retail.lightspeed.app/api/2.0 (Agent discovered it was X-Series, not Ecwid. Fixed).
+ 3. User: Server Decomposition: Break the 3300-line server.py monolith... Live Product Push... Sync Progress Tracker (Agent asked to proceed).
+ 4. User: Yes proceed (Agent decomposed server, fixed DB pool bugs, and added Sync Progress UI).
+ 5. User: Unable to create supplier, - Error message - Failed to create supplier (Agent debugged, found Postgres service crashed, added auto-start script to , and verified fix).
 
 **Project Health Check:**
-- Broken: Live supplier image downloads (SanMar IP block), Athletic Knit API (503 server errors on their end).
-- Mocked: Used sandbox credentials to bypass daily rate limits during development.
+  - Broken: SanMar API (403 IP block), Athletic Knit API (503 provider error).
+  - Mocked: ATC Sandbox credentials.
 
 **3rd Party Integrations**
-- PromoStandards API (Requires User API Key/Credentials)
-- Odoo XML-RPC (Requires User Odoo Credentials)
+	•	PromoStandards SOAP/BulkData (Requires User API Credentials)
+	•	Odoo XML-RPC (Requires User Odoo Credentials)
+	•	Lightspeed Retail X-Series (Requires User Domain Prefix & Personal Token)
 
 **Testing status**
-  - Testing agent used after significant changes: NO
+  - Testing agent used after significant changes: YES (Iterations 9, 10, 11, and 12).
   - Troubleshoot agent used after agent stuck in loop: NO
-  - Test files created: []
-  - Known regressions: None, though the newest UI features (Charts, Users CRUD) lack visual E2E validation.
+  - Test files created: None
+  - Known regressions: None.
 
 **Credentials to test flow:**
-- Admin Portal:  / 
-- ATC Production: Account , Pass , Media Pass 
-- ATC Sandbox (for BulkData testing): Account , Pass 
-- Odoo: URL , DB , User , Key 
+  - Admin Portal:  / 
+  - ATC Sandbox (PromoStandards): Account: , Pass: 
 
 **What agent forgot to execute**
-The agent successfully implemented the code for all 10 user requests (Dashboard charts, User CRUD, Bulk delete, etc.) but the context window ended before the agent could use the screenshot tool to visually verify that  renders correctly and the new UI layouts look cohesive. Visual smoke-testing of , , and  is required.</analysis>
+  - The Live Product Push testing (pushing real products to Lightspeed X-Series) was listed in the user's prompt, but requires the user to input their real  and  into the Settings UI. The agent implemented the capability but could not do the live push testing without these credentials.</analysis>

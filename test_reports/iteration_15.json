@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 15: Verified supplier CRUD after PostgreSQL fix. All 6 backend tests passed (create/list/get/update/delete + Lightspeed regression: test connection connected=true, categories returned 50+). Frontend Suppliers page loaded, created a new supplier via the form, toast 'Supplier created' shown and item appeared in the list. Supplier save bug is resolved.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Supplier dialog", "issues": ["React a11y warning: Missing Description/aria-describedby on DialogContent (radix). Non-blocking but should be fixed for accessibility."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_supplier_iter15.py",
+    "/app/test_reports/pytest/iter15_results.xml"
+  ],
+  "action_items": [
+    "Optional: add DialogDescription (or aria-describedby) to Suppliers Add/Edit dialog to remove Radix a11y warnings."
+  ],
+  "critical_code_review_comments": [
+    "routes/suppliers.py create_supplier returns only {id, message} but the test file test_supplier_crud.py (older iteration 12) expects supplier_name/status/services in the response - inconsistent. Consider returning the full inserted row for a better DX.",
+    "POST /api/suppliers does not check for duplicate supplier_name (schema likely has no unique constraint). Could allow duplicate entries.",
+    "update_supplier builds SQL dynamically but never handles the case where update_fields has only updated_at (still executes UPDATE with just timestamp - fine, but silent no-op if user posts empty body)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_supplier_iter15.py"
+  ],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100% (create + list verified)"},
+  "test_credentials": "admin / admin (portal); Lightspeed store=redleafssports, token=lsxs_pt_tiodrkFVK9qKD4xGeWj6TaY5RtUoMRHT",
+  "seed_data_creation": "Created and cleaned up TEST_Iter15_* suppliers via fixtures. One UI-created supplier TEST_UI_1786137058 may still exist and can be safely deleted.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "PostgreSQL supplier bug fully fixed. Auth uses /api/auth/login returning access_token; all supplier routes require Bearer token (admin role for POST/PUT/DELETE). REACT_APP_BACKEND_URL must be exported when running pytest locally as the .env is not auto-loaded by tests.",
+  "rca of the issue": "Original bug 'failed to save supplier' was due to PostgreSQL crashing between sessions and _ensure_postgresql() not recreating the user/database when PG restarted. Fix in server.py now always verifies user+DB exist regardless of PG running state. Confirmed by successful POST/PUT/DELETE against live PG-backed API."
+}

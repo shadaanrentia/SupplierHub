@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import axios from "axios";
+import axios from "../lib/axios";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,9 +9,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Truck, Plus, Pencil, Trash2, CheckCircle2, XCircle, Loader2, ChevronDown, ChevronUp } from "lucide-react";
 import { toast } from "sonner";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "") + "/api";
 
 const ENDPOINT_STYLES = [
+  {value:"athletic_knit",label:"Athletic Knit (PromoStandards)"},
+  {value:"caldwell",label:"Caldwell Recognition (REST)"},
   { value: "ss", label: "S&S Activewear" },
   { value: "atc", label: "ATC / SanMar" },
   { value: "alphabroder", label: "alphabroder" },
@@ -97,7 +99,7 @@ export default function Suppliers() {
   const handleTestConnection = async (supplierId) => {
     setTesting(supplierId);
     try {
-      const res = await axios.post(`${API}/suppliers/${supplierId}/test-connection`);
+      const res = await axios.post(`${API}/suppliers/${supplierId}/test`);
       setTestResults(prev => ({ ...prev, [supplierId]: res.data }));
       if (res.data.success) {
         toast.success("Connection successful!");
@@ -154,7 +156,7 @@ export default function Suppliers() {
               
               <div>
                 <label className="text-xs text-zinc-500 mb-1 block">Supplier Type *</label>
-                <Select value={form.endpoint_style} onValueChange={(v) => setForm({ ...form, endpoint_style: v, services: {} })}>
+                <Select value={form.endpoint_style} onValueChange={(v) => {setForm({ ...form, endpoint_style: v, services: {},api_base_url:v==='caldwell'?'https://caldwellrecognition.com':form.api_base_url });setShowAdvanced(v==='athletic_knit');}}>
                   <SelectTrigger className="bg-zinc-950 border-zinc-800 rounded-none font-mono text-sm" data-testid="endpoint-style-select">
                     <SelectValue placeholder="Select supplier type..." />
                   </SelectTrigger>
@@ -180,7 +182,7 @@ export default function Suppliers() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs text-zinc-500 mb-1 block">Account Number</label>
+                  <label className="text-xs text-zinc-500 mb-1 block">{form.endpoint_style==='caldwell'?'Customer login email':'Account ID / Number'}</label>
                   <Input
                     value={form.account_number}
                     onChange={(e) => setForm({ ...form, account_number: e.target.value })}
@@ -232,7 +234,7 @@ export default function Suppliers() {
                 
                 {showAdvanced && (
                   <div className="mt-4 space-y-3 p-3 bg-zinc-950/50 border border-zinc-800">
-                    <p className="text-xs text-zinc-600">Override auto-generated endpoints with custom URLs (optional)</p>
+                    <p className="text-xs text-zinc-600">{form.endpoint_style==='athletic_knit'?'Enter the working Athletic Knit Product Data, Inventory and Media service URLs':'Override auto-generated endpoints with custom URLs (optional)'}</p>
                     
                     {/* Bulk Data URL */}
                     <div>

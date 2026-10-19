@@ -1,0 +1,18 @@
+{
+  "summary": "Post-PostgreSQL-reinstall smoke test (iteration 17). Verified all 5 requested items: /api/health healthy, POST /api/auth/login with admin/admin returns valid JWT + user, GET /api/suppliers returns empty list on fresh DB, saved Lightspeed credentials via PUT /api/settings and POST /api/settings/lightspeed/test returns success=true, connected=true (redleafssports, API v2026-07). Frontend login page accepts admin/admin and successfully redirects to /dashboard showing 'Welcome back, Shadaan Rentia!' toast. No regressions detected.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Note: Lightspeed settings field names in DB are lightspeed_store_id and lightspeed_secret_token (not lightspeed_store_name/lightspeed_personal_token). PUT accepts unknown keys silently returning 200 — could mislead callers. Consider strict Pydantic model or reject unknown fields."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin/admin (works). Lightspeed store_id=redleafssports, personal token active.",
+  "seed_data_creation": "None; Lightspeed credentials re-saved into settings via PUT /api/settings as requested.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Fresh PostgreSQL DB — admin user auto-created on startup. Lightspeed connection confirmed. All prior data (suppliers, products) is empty. Frontend URL: https://product-bridge-23.preview.emergentagent.com",
+  "rca of the issue": "N/A — this was a smoke test verifying the PostgreSQL reinstall + _ensure_postgresql hardening fix. All requested endpoints and login flow work correctly."
+}

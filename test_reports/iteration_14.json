@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 14 - LIVE Lightspeed X-Series integration verified end-to-end with real Personal Token against redleafssports store. All 6 backend pytest cases passed (API_VERSION=2026-07, settings persistence, live test-connection returns connected=true, live categories fetch returns 58 categories with correct structure, OAuth authorize URL, disconnect endpoint). Frontend Settings page shows success toast 'Connected to Lightspeed Retail (redleafssports) via Personal Token. API v2026-07.' after clicking Test Connection. Category Mapping page successfully switches to Lightspeed platform, fetches 58 real categories (Archived, Batting Gloves & Inners, Cricket Balls, English Willow Bats, etc.) and displays them with Category ID / Category Name / Visible columns.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Category Mapping", "issues": ["Target Platform dropdown labels the Lightspeed option as 'Lightspeed eCom' while the integration is actually Lightspeed Retail (X-Series). The Settings page correctly uses 'Lightspeed Retail (X-Series)'. Consider renaming the dropdown label to 'Lightspeed Retail' or 'Lightspeed (X-Series)' for consistency and to avoid confusion with Lightspeed eCom, which is a different product line."]}
+    ]
+  },
+  "passed_tests": [
+    "API_VERSION constant equals '2026-07'",
+    "PUT /api/settings persists Lightspeed store_id/personal_token/client_id/client_secret",
+    "POST /api/settings/lightspeed/test returns connected=true with live Personal Token (redleafssports)",
+    "GET /api/categories/lightspeed returns 58 real categories with keys lightspeed_category_id, category_name, parent_id, leaf_category, category_path",
+    "GET /api/lightspeed/oauth/authorize returns valid URL with client_id, state, response_type=code, scope",
+    "POST /api/lightspeed/oauth/disconnect clears tokens and returns success",
+    "Frontend Settings: Test Connection button triggers real API call and shows success toast with domain + API version",
+    "Frontend Category Mapping: Platform dropdown switch to Lightspeed + Sync Categories from Lightspeed fetches and renders 58 real categories in a table"
+  ],
+  "failed_tests": [],
+  "test_report_links": [
+    "/app/backend/tests/test_lightspeed_live_iteration14.py",
+    "/app/test_reports/pytest/pytest_iteration14.xml"
+  ],
+  "action_items": [
+    "(Minor) Rename Category Mapping dropdown label from 'Lightspeed eCom' to 'Lightspeed Retail' or 'Lightspeed (X-Series)' to match Settings page terminology and avoid confusion with the separate Lightspeed eCom product."
+  ],
+  "critical_code_review_comments": [
+    "lightspeed_service.py get_categories() correctly handles the 2026-07 nested response structure data.data.categories[] with fallback for older list format - implementation matches spec.",
+    "OAuth _oauth_states remains an in-memory dict; not multi-worker safe, but acceptable for preview/single-worker.",
+    "FRONTEND_URL still defaults to '' silently in routes/lightspeed.py; if REACT_APP_BACKEND_URL is missing, OAuth callback URLs would break silently - consider failing fast.",
+    "Category Mapping UI uses inconsistent 'Lightspeed eCom' label vs 'Lightspeed Retail (X-Series)' on Settings page."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_lightspeed_live_iteration14.py"
+  ],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100% (all live flows verified)"},
+  "test_credentials": {"admin": {"username": "admin", "password": "admin"}, "lightspeed_domain": "redleafssports", "lightspeed_personal_token": "lsxs_pt_tiodrkFVK9qKD4xGeWj6TaY5RtUoMRHT"},
+  "seed_data_creation": "Persisted Lightspeed credentials (domain=redleafssports, personal_token, client_id, client_secret) into settings via PUT /api/settings.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Live Lightspeed Retail X-Series (redleafssports) integration is fully working with Personal Token auth. Real store has 58 categories. To avoid disturbing the live store, do NOT execute /api/sync/lightspeed/{supplier_id} against real product data. The disconnect test wipes OAuth access/refresh tokens only, not the Personal Token (which lives in lightspeed_secret_token). If PostgreSQL crashes: pg_ctlcluster 15 main start. Login returns 'token' field. Key data-testids: login-username, login-password, login-submit, test-lightspeed-btn, connect-lightspeed-oauth-btn, disconnect-lightspeed-btn."
+}

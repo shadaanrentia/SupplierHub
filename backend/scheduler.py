@@ -36,12 +36,12 @@ async def _run_sync_for_all_suppliers(sync_type: str):
             return
 
         # Import sync tasks lazily to avoid circular imports
-        from server import (
+        from routes.sync import (
             sync_products_task,
             sync_inventory_task,
             sync_pricing_task,
-            _create_sync_log,
         )
+        from deps import create_sync_log as _create_sync_log
 
         task_map = {
             "products": sync_products_task,

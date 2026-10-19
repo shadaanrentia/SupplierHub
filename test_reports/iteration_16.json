@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 16: Verified Lightspeed category mapping UUID handling and preprocessing validation. All 8 backend tests + 5 frontend checks passed. DB column migrated to TEXT, UUID string mappings persist correctly, /api/categories/lightspeed returns hierarchy fields (parent_id, leaf_category, category_path), preprocessing marks products with lightspeed mapping as valid. Frontend: Lightspeed categories display as Level 1 (green icon) / Level 2 (indented) hierarchy with L1/L2 badges, NO Category ID column, dropdown shows 'Parent > Child' format for leaf categories, mapping saves and shows green check. Preprocessing page shows HEADWEAR product with Odoo Category 'Not Mapped' but Status 'Ready' - confirming the OR logic works (valid when only lightspeed mapping exists).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Preprocessing table", "issues": ["Column labelled 'Odoo Category' only - when target platform is Lightspeed, users can't see the mapped Lightspeed category. Consider showing platform-aware category column or both columns."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_lightspeed_categories_iter16.py",
+    "/app/test_reports/pytest/iter16_results.xml"
+  ],
+  "action_items": [
+    "(Optional/UX) In Pre-Processing table, show a 'Lightspeed Category' column (or make the category column platform-aware) so users can see when a product is mapped only to Lightspeed."
+  ],
+  "critical_code_review_comments": [
+    "routes/categories.py: POST /api/category-mappings has no way to explicitly clear (set NULL) an existing lightspeed_category_id — passing null/empty string is treated as 'no change' because of the `is not None` guard. Consider allowing empty string to explicitly clear the mapping.",
+    "routes/categories.py: GET /api/category-mappings does not JOIN with Lightspeed category names, so UI cannot display the human-readable Lightspeed category name for existing mappings without extra client-side lookup.",
+    "routes/preprocessing.py: validate_products_for_sync stores only mapping['odoo_category_id'] in product_sync_status.mapped_category_id — Lightspeed mappings are not persisted to sync status. Should also store lightspeed_category_id.",
+    "routes/preprocessing.py: get_preprocessing_products joins only odoo_categories for name — no join for Lightspeed category name."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_lightspeed_categories_iter16.py"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% (all requested flows verified)"},
+  "test_credentials": "admin/admin; Lightspeed store=redleafssports, token=lsxs_pt_tiodrkFVK9qKD4xGeWj6TaY5RtUoMRHT",
+  "seed_data_creation": "Test data created & cleaned up in test: category_mapping row for TEST_HEADWEAR_ITER16 with UUID 9250b0f7-...; ephemeral products + product_media row (deleted in test teardown). No residual test data.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Auth returns {token, user} (NOT access_token). Preprocessing considers a product valid if EITHER odoo_category_id OR lightspeed_category_id is mapped for its supplier category. Lightspeed category IDs are UUID strings; DB column is TEXT. lsHierarchy on frontend uses only categories with !parent_id as roots.",
+  "rca of the issue": "All three reported bugs are fixed: (1) DB migration ALTER COLUMN lightspeed_category_id TYPE TEXT works (verified via information_schema). (2) POST /api/category-mappings correctly stores UUID string; GET returns identical string. (3) Preprocessing has_category_mapping = mapped_odoo OR mapped_lightspeed — verified by creating a product with only a Lightspeed mapping and confirming is_valid=true, status='ready'."
+}

@@ -1,18 +1,26 @@
 version: '3.8'
 
 services:
-  mongodb:
-    image: mongo:6.0
-    container_name: supplierhub-mongodb
+  postgres:
+    image: postgres:15-alpine
+    container_name: supplierhub-postgres
     restart: unless-stopped
     environment:
-      MONGO_INITDB_DATABASE: supplierhub
+      POSTGRES_USER: ${POSTGRES_USER:-supplierhub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supplierhub_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-supplierhub_db}
     volumes:
-      - mongodb_data:/data/db
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
     ports:
-      - "27017:27017"
+      - "5432:5432"
     networks:
       - supplierhub-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-supplierhub}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   backend:
     build:
@@ -20,15 +28,15 @@ services:
       dockerfile: Dockerfile
     container_name: supplierhub-backend
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - MONGO_URL=mongodb://mongodb:27017
-      - DB_NAME=supplierhub
-      - JWT_SECRET=${JWT_SECRET:-change-this-in-production}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-supplierhub}:${POSTGRES_PASSWORD:-supplierhub_pass}@postgres:5432/${POSTGRES_DB:-supplierhub_db}
     ports:
       - "8001:8001"
     depends_on:
-      - mongodb
+      postgres:
+        condition: service_healthy
     networks:
       - supplierhub-network
 
@@ -37,7 +45,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL:-http://localhost:8001}
+        - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL:-}
     container_name: supplierhub-frontend
     restart: unless-stopped
     ports:
@@ -48,7 +56,7 @@ services:
       - supplierhub-network
 
 volumes:
-  mongodb_data:
+  postgres_data:
 
 networks:
   supplierhub-network:
