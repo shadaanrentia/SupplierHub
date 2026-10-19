@@ -143,7 +143,7 @@ export default function ProductDetail() {
                 <CardTitle className="font-heading text-sm font-bold uppercase text-zinc-400 tracking-wider">Description</CardTitle>
               </CardHeader>
               <CardContent className="p-4">
-                <p className="text-sm text-zinc-300 leading-relaxed">{product.description || "No description available."}</p>
+                <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-line"> {product.description || "No description available."}</p>
                 {uniqueColors.length > 0 && (
                   <div className="mt-4">
                     <p className="text-xs text-zinc-500 mb-2">Available Colors</p>

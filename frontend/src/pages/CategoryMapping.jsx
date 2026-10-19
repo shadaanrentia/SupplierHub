@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import axios from "../lib/axios";
+import SanMarCategoryMapping from "./SanMarCategoryMapping";
+import CategoryPolicyManager from "./CategoryPolicyEditor";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
@@ -9,8 +11,8 @@ import { RefreshCw, FolderTree, ArrowRight, Check, X, Zap, ChevronRight } from "
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
-export default function CategoryMapping() {
-  const [platform, setPlatform] = useState("odoo");
+function LegacyCategoryMapping() {
+  const [platform, setPlatform] = useState("lightspeed");
   const [odooCategories, setOdooCategories] = useState([]);
   const [lightspeedCategories, setLightspeedCategories] = useState([]);
   const [supplierCategories, setSupplierCategories] = useState([]);
@@ -49,23 +51,13 @@ export default function CategoryMapping() {
   // Build hierarchical Lightspeed categories (Level 1 -> Level 2)
   const lsHierarchy = useMemo(() => {
     if (!lightspeedCategories.length) return [];
-    const roots = lightspeedCategories.filter(c => !c.parent_id);
-    const children = lightspeedCategories.filter(c => c.parent_id);
-    const childMap = {};
-    children.forEach(c => {
-      if (!childMap[c.parent_id]) childMap[c.parent_id] = [];
-      childMap[c.parent_id].push(c);
-    });
-    // Build flat list with level info for display
     const result = [];
-    roots.sort((a, b) => a.category_name.localeCompare(b.category_name));
-    roots.forEach(root => {
-      result.push({ ...root, level: 1 });
-      const kids = (childMap[root.lightspeed_category_id] || []).sort((a, b) => a.category_name.localeCompare(b.category_name));
-      kids.forEach(child => {
-        result.push({ ...child, level: 2 });
-      });
-    });
+    const visit = (parentId, level = 1) => {
+      lightspeedCategories.filter(c => (c.parent_id || null) === parentId)
+        .sort((a,b) => a.category_name.localeCompare(b.category_name))
+        .forEach(c => { result.push({...c, level}); if(level < 3) visit(c.lightspeed_category_id, level + 1); });
+    };
+    visit(null);
     return result;
   }, [lightspeedCategories]);
 
@@ -382,7 +374,7 @@ export default function CategoryMapping() {
                                 targetCategories.map((c) => (
                                   <SelectItem key={c.lightspeed_category_id} value={c.lightspeed_category_id}>
                                     {(c.category_path && c.category_path.length > 1)
-                                      ? `${c.category_path[0].name} > ${c.category_name}`
+                                      ? c.category_path.map(p => p.name).join(" > ")
                                       : c.category_name}
                                   </SelectItem>
                                 ))
@@ -447,4 +439,13 @@ export default function CategoryMapping() {
       )}
     </div>
   );
+}
+
+export default function CategoryMapping() {
+  const [mode, setMode] = useState('sanmar');
+  return <><div className="px-6 pt-5 flex flex-wrap gap-2" aria-label="Mapping mode">
+    <Button variant={mode==='sanmar'?'default':'outline'} onClick={() => setMode('sanmar')}>SanMar catalogue mapping</Button>
+    <Button variant={mode==='legacy'?'default':'outline'} onClick={() => setMode('legacy')}>Legacy / other supplier mapping</Button>
+    <Button variant={mode==='defaults'?'default':'outline'} onClick={() => setMode('defaults')}>Category pricing &amp; measurements</Button>
+  </div>{mode==='sanmar'?<SanMarCategoryMapping />:mode==='defaults'?<CategoryPolicyManager />:<LegacyCategoryMapping />}</>;
 }

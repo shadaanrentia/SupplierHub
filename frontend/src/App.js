@@ -17,6 +17,7 @@ import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import ForgotPassword from "@/pages/ForgotPassword";
 import Users from "@/pages/Users";
+import ExportReview from "@/pages/ExportReview";
 
 function App() {
   const [user, setUser] = useState(null);
@@ -68,6 +69,7 @@ function App() {
               <Route path="/suppliers" element={<Suppliers />} />
               <Route path="/sync" element={<SyncManagement />} />
               <Route path="/category-mapping" element={<CategoryMapping />} />
+              <Route path="/export-review" element={<ExportReview />} />
               <Route path="/preprocessing" element={<ProductPreprocessing />} />
               <Route path="/settings" element={<Settings />} />
               {user.role === "admin" && <Route path="/users" element={<Users />} />}
