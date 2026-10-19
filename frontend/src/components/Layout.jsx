@@ -13,6 +13,7 @@ const getNavItems = (isAdmin) => {
     { path: "/sync", label: "Sync Jobs", icon: RefreshCw },
     { path: "/category-mapping", label: "Category Mapping", icon: FolderTree },
     { path: "/preprocessing", label: "Pre-Processing", icon: Zap },
+    { path: "/export-review", label: "Export Review", icon: Layers },
     { path: "/settings", label: "Settings", icon: Settings },
   ];
   if (isAdmin) {

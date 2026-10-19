@@ -270,6 +270,20 @@ async def startup():
         ]:
             await conn.execute(alt)
 
+        from taxonomy_schema import init_taxonomy_schema
+        await init_taxonomy_schema(conn)
+        from product_name_schema import init_product_name_schema
+        await init_product_name_schema(conn)
+        from export_safety import init_export_safety_schema
+        from routes.export_review import init_export_review_schema
+
+        await init_export_safety_schema(conn)
+        await init_export_review_schema(conn)
+
+        await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS source_metadata JSONB DEFAULT '{}'::jsonb; ALTER TABLE products ADD COLUMN IF NOT EXISTS source_product_type TEXT; ALTER TABLE products ADD COLUMN IF NOT EXISTS standard_inventory INTEGER")
+        from routes.sync import init_sync_schema
+        await init_sync_schema(conn)
+
         # Persistent Lightspeed image synchronization jobs
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS lightspeed_image_jobs (
@@ -369,16 +383,19 @@ from routes.suppliers import router as suppliers_router
 from routes.products import router as products_router
 from routes.dashboard import router as dashboard_router
 from routes.settings import router as settings_router
-from routes.sync import router as sync_router
+from routes.sync import router as sync_router, init_sync_schema
 from routes.odoo import router as odoo_router
 from routes.lightspeed import router as lightspeed_router
 from routes.categories import router as categories_router
+from routes.taxonomy import router as taxonomy_router
+from taxonomy_extensions import router as taxonomy_extensions_router
 from routes.preprocessing import router as preprocessing_router
 from routes.media import router as media_router
+from routes.export_review import router as export_review_router
 
 for r in [auth_router, suppliers_router, products_router, dashboard_router,
           settings_router, sync_router, odoo_router, lightspeed_router,
-          categories_router, preprocessing_router, media_router]:
+          categories_router, taxonomy_router,taxonomy_extensions_router, preprocessing_router, media_router, export_review_router]:
     app.include_router(r)
 
 

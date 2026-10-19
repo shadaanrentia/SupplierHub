@@ -1,117 +1,233 @@
-"""Preprocessing routes: products validation, pricing, Odoo sync, preview."""
+"""Preprocessing routes: Lightspeed validation, category defaults, supplier scope and preview."""
 import json
+from export_safety import validate_prices, export_name
+from product_readiness import load_readiness, public_state
+from size_order import size_key
+from fastapi import Query
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 import deps
 from deps import row_to_dict, new_id, utc_now, get_current_user, calculate_sale_price
+from deps import get_admin_user
+from pydantic import BaseModel
+from typing import Literal, Optional
+from pricing_rules import ensure_pricing_schema, pricing_summary, pricing_policy, price_for, number, category_policies, apply_category_policy
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 
-@router.get("/preprocessing/products")
-async def get_preprocessing_products(page: int = 1, limit: int = 50, status: str = None, user: dict = Depends(get_current_user)):
-    offset = (page - 1) * limit
-    async with deps.pool.acquire() as conn:
-        settings = await conn.fetchrow("SELECT markup_percentage FROM settings WHERE id = 'system_settings'")
-        markup = float(settings['markup_percentage']) if settings else 40.0
-        where_clause = f"WHERE p.preprocessing_status = '{status}'" if status else ""
-        query = f'''
-            SELECT p.*, s.supplier_name, cm.odoo_category_id as mapped_odoo_category_id,
-                cm.lightspeed_category_id as mapped_lightspeed_category_id,
-                oc.category_name as odoo_category_name,
-                (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id) as variants_count,
-                (SELECT COUNT(*) FROM product_media pm WHERE pm.product_id = p.id) as images_count,
-                pss.sync_status, pss.sale_price as calculated_sale_price, pss.validation_errors, pss.last_sync_date
-            FROM products p LEFT JOIN suppliers s ON p.supplier_id = s.id
-            LEFT JOIN category_mapping cm ON p.category = cm.supplier_category_name
-            LEFT JOIN odoo_categories oc ON cm.odoo_category_id = oc.odoo_category_id
-            LEFT JOIN product_sync_status pss ON p.id = pss.product_id
-            {where_clause} ORDER BY p.updated_at DESC LIMIT $1 OFFSET $2
-        '''
-        rows = await conn.fetch(query, limit, offset)
-        count_query = f"SELECT COUNT(*) FROM products p {where_clause}"
-        total = await conn.fetchval(count_query)
-        products = []
-        for row in rows:
-            product = row_to_dict(row)
-            cost_price = float(product.get('base_price') or 0)
-            if not product.get('calculated_sale_price'):
-                product['calculated_sale_price'] = calculate_sale_price(cost_price, markup)
-            product['cost_price'] = cost_price
-            product['markup_percentage'] = markup
-            errors = []
-            has_category_mapping = product.get('mapped_odoo_category_id') or product.get('mapped_lightspeed_category_id')
-            if not has_category_mapping: errors.append("Missing category mapping")
-            if not product.get('images_count') or product['images_count'] == 0: errors.append("No images")
-            if cost_price <= 0: errors.append("Invalid price")
-            product['validation_errors'] = errors
-            product['is_valid'] = len(errors) == 0
-            product['status'] = 'ready' if len(errors) == 0 else 'invalid'
-            products.append(product)
-        return {"products": products, "total": total, "page": page, "limit": limit, "markup_percentage": markup}
+async def catalog(conn, search='', supplier_id=None):
+    return [row_to_dict(r) for r in await conn.fetch("SELECT p.*,s.supplier_name FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE (p.product_name ILIKE $1 OR p.supplier_sku ILIKE $1) AND ($2::varchar IS NULL OR p.supplier_id=$2) ORDER BY p.updated_at DESC,p.id", '%'+search.strip()+'%', supplier_id)]
 
 
-@router.get("/preprocessing/summary")
-async def get_preprocessing_summary(user: dict = Depends(get_current_user)):
+def measurement_summary(variants, fallback):
+    from shipping_measurements import source_measurements
+    weight_count, dimensions_count, errors = 0, 0, []
+    for v in variants:
+        try:
+            measurements=source_measurements(dict(v,category_shipping=fallback))
+            weight_count+=int(bool(measurements.get('weight')))
+            dimensions_count+=int(all(measurements.get(k) for k in ('dimensions_length','dimensions_width','dimensions_height')))
+        except (ValueError,TypeError,KeyError) as exc:errors.append(str(exc))
+    total=len(variants)
+    weight_ready=bool(total) and weight_count==total
+    dimensions_ready=bool(total) and dimensions_count==total
+    status='complete' if weight_ready and dimensions_ready else ('dimensions_missing' if weight_ready else 'weight_missing' if dimensions_ready else 'missing')
+    if errors:status='invalid'
+    labels={'complete':'Complete','dimensions_missing':'Dimensions missing','weight_missing':'Weight missing','missing':'Measurements missing','invalid':'Measurements need review'}
+    return {'status':status,'label':labels[status],'complete':status=='complete','total_variants':total,
+        'variants_with_weight':weight_count,'variants_with_dimensions':dimensions_count,'errors':errors[:3]}
+
+
+async def policy_catalog(conn,supplier_id=None):
+    settings=await conn.fetchrow("SELECT lightspeed_store_id,markup_percentage FROM settings WHERE id='system_settings'")
+    domain=str(settings['lightspeed_store_id'] or '').strip() if settings else ''
+    markup=float(settings['markup_percentage']) if settings and settings['markup_percentage'] is not None else 40.0
+    products=await catalog(conn,supplier_id=supplier_id)
+    states=await load_readiness(conn,products)
+    rules=await category_policies(conn)
+    entries={}
+    nodes=await conn.fetch("""SELECT d.supplier_id,d.path,d.category_id,COALESCE(n.data,c.data) AS data FROM supplier_taxonomy_destinations d
+        LEFT JOIN supplier_taxonomy_nodes n ON n.supplier_id=d.supplier_id AND n.path=d.path
+        LEFT JOIN supplier_taxonomy_custom_nodes c ON c.supplier_id=d.supplier_id AND c.path=d.path
+        WHERE d.store_domain=$1 AND ($2::varchar IS NULL OR d.supplier_id=$2)""",domain,supplier_id)
+    for row in nodes:
+        node=json.loads(row['data']) if isinstance(row['data'],str) else row['data']
+        if not node:continue
+        if node.get('leaf') and node.get('verified'):
+            entries[(row['supplier_id'],str(row['category_id']))]={'supplier_id':row['supplier_id'],'category_id':str(row['category_id']),'path':row['path'],'category_name':row['path'],'product_count':0}
+    for product in products:
+        state=states[product['id']];cid=state['mapped_lightspeed_category_id']
+        if not cid:continue
+        key=(product['supplier_id'],str(cid))
+        if key not in entries:entries[key]={'supplier_id':key[0],'category_id':key[1],'path':state.get('mapped_category_name') or product.get('category'),'category_name':state.get('mapped_category_name') or product.get('category'),'product_count':0}
+        entries[key]['product_count']+=1
+    for key,item in entries.items():
+        rule=rules.get(key,{})
+        item.update(mode=rule.get('pricing_mode') or 'global',value=rule.get('pricing_value'),**{k:rule.get(k) for k in ('weight_lb','length_in','width_in','height_in')})
+        mode,value=item['mode'],item['value']
+        item['pricing_label']=f'Global {markup:g}%' if mode=='global' else f'Category {float(value):g}%' if mode=='percentage' else f'Category base ${float(value):.2f}'
+        item['measurements_configured']=all(item.get(k) is not None and float(item[k])>0 for k in ('weight_lb','length_in','width_in','height_in'))
+    return sorted(entries.values(),key=lambda r:(r['supplier_id'],str(r['category_name'])))
+
+
+@router.get('/category-policies')
+async def get_category_policies(supplier_id: str=None,user=Depends(get_current_user)):
+    await ensure_pricing_schema()
     async with deps.pool.acquire() as conn:
-        total_products = await conn.fetchval("SELECT COUNT(*) FROM products")
-        total_variants = await conn.fetchval("SELECT COUNT(*) FROM product_variants")
-        mapped_count = await conn.fetchval('SELECT COUNT(DISTINCT p.id) FROM products p INNER JOIN category_mapping cm ON p.category = cm.supplier_category_name WHERE cm.odoo_category_id IS NOT NULL OR cm.lightspeed_category_id IS NOT NULL')
-        unmapped_count = await conn.fetchval('SELECT COUNT(*) FROM products p LEFT JOIN category_mapping cm ON p.category = cm.supplier_category_name WHERE (cm.odoo_category_id IS NULL AND cm.lightspeed_category_id IS NULL) OR p.category IS NULL OR p.category = \'\'')
-        with_images = await conn.fetchval('SELECT COUNT(DISTINCT product_id) FROM product_media')
-        with_price = await conn.fetchval("SELECT COUNT(*) FROM products WHERE base_price > 0")
-        synced = await conn.fetchval("SELECT COUNT(*) FROM products WHERE odoo_sync_status = 'synced'")
-        pending = await conn.fetchval("SELECT COUNT(*) FROM products WHERE odoo_sync_status = 'pending' OR odoo_sync_status IS NULL")
-        failed = await conn.fetchval("SELECT COUNT(*) FROM products WHERE odoo_sync_status = 'failed'")
-        ready_for_sync = await conn.fetchval("SELECT COUNT(DISTINCT p.id) FROM products p INNER JOIN category_mapping cm ON p.category = cm.supplier_category_name WHERE (cm.odoo_category_id IS NOT NULL OR cm.lightspeed_category_id IS NOT NULL) AND p.base_price > 0 AND p.odoo_sync_status != 'synced'")
-        return {
-            "total_products": total_products, "total_variants": total_variants,
-            "category_mapping": {"mapped": mapped_count, "unmapped": unmapped_count},
-            "images": {"with_images": with_images, "without_images": total_products - with_images},
-            "pricing": {"with_price": with_price, "without_price": total_products - with_price},
-            "sync_status": {"synced": synced, "pending": pending, "failed": failed, "ready": ready_for_sync}
-        }
+        categories=await policy_catalog(conn,supplier_id)
+    return {'categories':categories}
+
+
+@router.get('/preprocessing/products')
+async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(50,ge=1,le=100), status: str=None, search: str='', supplier_id: str=None, user: dict=Depends(get_current_user)):
+    await ensure_pricing_schema()
+    if status not in (None,'all','ready','invalid','synced','images_pending'): raise HTTPException(400,'Unknown status filter')
+    async with deps.pool.acquire() as conn:
+        settings=await conn.fetchrow("SELECT markup_percentage FROM settings WHERE id='system_settings'")
+        markup=float(settings['markup_percentage']) if settings and settings['markup_percentage'] is not None else 40.0
+        products=await catalog(conn,search,supplier_id)
+        states=await load_readiness(conn,products)
+        policies=await category_policies(conn)
+    result=[]
+    for product in products:
+        state=states[product['id']]
+        product=apply_category_policy(product,state['mapped_lightspeed_category_id'],policies)
+        product['measurement_summary']=measurement_summary(state['variants'],product['category_shipping'])
+        if state['excluded_from_queue']: continue
+        if status not in (None,'all') and state['status']!=status: continue
+        product.update(public_state(state))
+        product['product_name']=export_name(product.get('product_name'),product.get('supplier_sku'))
+        cost=float(product.get('base_price') or 0)
+        product.update(cost_price=cost,markup_percentage=markup)
+        try:
+            product.update(pricing_summary(product, state['variants'], markup))
+        except ValueError as exc:
+            product.update(calculated_sale_price=None, retail_price_min=None, retail_price_max=None, pricing_label='Pricing needs review', pricing_error=str(exc), is_valid=False, can_sync=False)
+        result.append(product)
+    offset=(page-1)*limit
+    return {'products':result[offset:offset+limit],'total':len(result),'page':page,'limit':limit,'markup_percentage':markup}
+
+
+@router.get('/preprocessing/summary')
+async def get_preprocessing_summary(supplier_id: str=None, user: dict=Depends(get_current_user)):
+    async with deps.pool.acquire() as conn:
+        products=await catalog(conn,supplier_id=supplier_id)
+        states=await load_readiness(conn,products)
+    products=[p for p in products if not states[p['id']]['excluded_from_queue']]
+    values=[states[p['id']] for p in products]; total=len(values)
+    mapped=sum(bool(s['mapped_lightspeed_category_id']) for s in values)
+    with_images=sum(bool(s['images_count']) for s in values)
+    with_price=sum(not p.get('price_needs_review') and float(p.get('base_price') or 0)>0 for p in products)
+    return {'total_products':total,'total_variants':sum(s['variants_count'] for s in values),
+        'category_mapping':{'mapped':mapped,'unmapped':total-mapped},
+        'images':{'with_images':with_images,'without_images':total-with_images},
+        'pricing':{'with_price':with_price,'without_price':total-with_price},
+        'sync_status':{'ready':sum(s['status']=='ready' for s in values),'synced':sum(s['status']=='synced' for s in values),
+                       'pending':sum(s['status']=='invalid' for s in values),'failed':sum(p.get('lightspeed_sync_status')=='failed' for p in products)}}
 
 
 @router.post("/preprocessing/recalculate-prices")
 async def recalculate_all_prices(user: dict = Depends(get_current_user)):
+    await ensure_pricing_schema()
     async with deps.pool.acquire() as conn:
         settings = await conn.fetchrow("SELECT markup_percentage FROM settings WHERE id = 'system_settings'")
-        markup = float(settings['markup_percentage']) if settings else 40.0
-        products = await conn.fetch("SELECT id, base_price FROM products WHERE base_price > 0")
+        markup = float(settings['markup_percentage']) if settings and settings['markup_percentage'] is not None else 40.0
+        products = await catalog(conn)
+        states = await load_readiness(conn,products)
+        policies = await category_policies(conn)
         updated = 0
         for p in products:
-            cost = float(p['base_price']); sale_price = calculate_sale_price(cost, markup)
+            variants = [dict(v) for v in await conn.fetch('SELECT * FROM product_variants WHERE product_id=$1 AND is_active IS NOT FALSE', p['id'])]
+            from sku_eligibility import eligible_variants
+            variants = eligible_variants(variants)
+            if not variants: continue
+            p = apply_category_policy(p,states[p['id']]['mapped_lightspeed_category_id'],policies)
+            summary = pricing_summary(p, variants, markup)
+            cost = summary['pricing_anchor_cost']; sale_price = summary['calculated_sale_price']
             await conn.execute('INSERT INTO product_sync_status (id, product_id, cost_price, sale_price, updated_at) VALUES ($1,$2,$3,$4,NOW()) ON CONFLICT (product_id) DO UPDATE SET cost_price=EXCLUDED.cost_price, sale_price=EXCLUDED.sale_price, updated_at=NOW()',
                 new_id(), p['id'], cost, sale_price)
             updated += 1
+            await conn.execute("UPDATE products SET lightspeed_sync_status=CASE WHEN lightspeed_sync_status='images_pending' THEN 'images_pending' ELSE 'pending' END,updated_at=NOW() WHERE id=$1", p['id'])
         return {"success": True, "updated": updated, "markup_percentage": markup}
 
 
-@router.post("/preprocessing/validate-products")
-async def validate_products_for_sync(data: dict = None, user: dict = Depends(get_current_user)):
-    product_ids = data.get('product_ids', []) if data else []
+class CategoryPolicy(BaseModel):
+    supplier_id: str
+    category_id: str
+    mode: Literal['global','percentage','direct'] = 'global'
+    value: Optional[float] = None
+    weight_lb: Optional[float] = None
+    length_in: Optional[float] = None
+    width_in: Optional[float] = None
+    height_in: Optional[float] = None
+
+
+@router.get('/category-policy')
+@router.get('/preprocessing/category-policy')
+async def get_category_policy(supplier_id: str, category_id: str, user=Depends(get_current_user)):
+    await ensure_pricing_schema()
     async with deps.pool.acquire() as conn:
-        settings = await conn.fetchrow("SELECT markup_percentage FROM settings WHERE id = 'system_settings'")
-        markup = float(settings['markup_percentage']) if settings else 40.0
-        products = await conn.fetch("SELECT * FROM products WHERE id = ANY($1)", product_ids) if product_ids else await conn.fetch("SELECT * FROM products")
-        validated = 0; invalid = 0
-        for p in products:
-            product = row_to_dict(p); errors = []
-            mapping = await conn.fetchrow('SELECT cm.odoo_category_id, cm.lightspeed_category_id FROM category_mapping cm WHERE cm.supplier_category_name = $1 AND (cm.odoo_category_id IS NOT NULL OR cm.lightspeed_category_id IS NOT NULL)', product.get('category', ''))
-            if not mapping: errors.append("Missing category mapping")
-            cost = float(product.get('base_price') or 0)
-            if cost <= 0: errors.append("Invalid or missing price")
-            images_count = await conn.fetchval("SELECT COUNT(*) FROM product_media WHERE product_id = $1", product['id'])
-            if images_count == 0: errors.append("No product images")
-            sale_price = calculate_sale_price(cost, markup) if cost > 0 else 0
-            status = 'ready' if len(errors) == 0 else 'invalid'
-            await conn.execute('INSERT INTO product_sync_status (id, product_id, supplier_id, cost_price, sale_price, mapped_category_id, images_count, validation_errors, sync_status, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW()) ON CONFLICT (product_id) DO UPDATE SET cost_price=EXCLUDED.cost_price, sale_price=EXCLUDED.sale_price, mapped_category_id=EXCLUDED.mapped_category_id, images_count=EXCLUDED.images_count, validation_errors=EXCLUDED.validation_errors, sync_status=EXCLUDED.sync_status, updated_at=NOW()',
-                new_id(), product['id'], product.get('supplier_id'), cost, sale_price, mapping['odoo_category_id'] if mapping else None, images_count, json.dumps(errors), status)
-            if len(errors) == 0: validated += 1
-            else: invalid += 1
-        return {"success": True, "total": len(products), "validated": validated, "invalid": invalid}
+        policies=await category_policies(conn)
+    rule=policies.get((supplier_id,category_id),{})
+    return {'mode':rule.get('pricing_mode') or 'global','value':rule.get('pricing_value'),
+        **{k:rule.get(k) for k in ('weight_lb','length_in','width_in','height_in')}}
+
+
+@router.put('/category-policy')
+@router.put('/preprocessing/category-policy')
+async def set_category_policy(body: CategoryPolicy, user=Depends(get_admin_user)):
+    await ensure_pricing_schema()
+    try:
+        value=None if body.mode=='global' else number(body.value,'Pricing value',body.mode=='percentage')
+        if body.mode=='direct' and value<0.01:raise ValueError('Base selling price must be at least $0.01')
+        values={k:None if getattr(body,k) is None else number(getattr(body,k),k) for k in ('weight_lb','length_in','width_in','height_in')}
+        if value is not None and value>9999999999:raise ValueError('Pricing value is too large')
+        if any(v is not None and v>9999999999 for v in values.values()):raise ValueError('Shipping value is too large')
+        if any(v is not None and v<0.0001 for v in values.values()):raise ValueError('Shipping values must be at least 0.0001')
+        dims=[values[k] for k in ('length_in','width_in','height_in')]
+        if any(v is not None for v in dims) and not all(v is not None for v in dims):raise ValueError('Enter all three dimensions or leave all blank')
+    except ValueError as exc:raise HTTPException(400,str(exc))
+    async with deps.pool.acquire() as conn:
+        async with conn.transaction():
+            if not await conn.fetchval('SELECT 1 FROM suppliers WHERE id=$1',body.supplier_id):raise HTTPException(404,'Supplier not found')
+            products=await catalog(conn,supplier_id=body.supplier_id)
+            # Prevent an edit from changing an in-flight export; lock the supplier's products.
+            for product in sorted(products,key=lambda p:p['id']):
+                if not await conn.fetchval('SELECT pg_try_advisory_xact_lock(hashtext($1))','export-review:'+product['id']):raise HTTPException(409,'A supplier product is exporting; try again when it finishes')
+            states=await load_readiness(conn,products)
+            affected=[p['id'] for p in products if str(states[p['id']]['mapped_lightspeed_category_id'] or '')==body.category_id]
+            settings=await conn.fetchrow("SELECT lightspeed_store_id FROM settings WHERE id='system_settings'")
+            domain=str(settings['lightspeed_store_id'] or '').strip() if settings else ''
+            if not domain:raise HTTPException(400,'Configure a Lightspeed store first')
+            entries=await policy_catalog(conn,body.supplier_id)
+            if not any(r['category_id']==body.category_id for r in entries):raise HTTPException(400,'Choose a published category for this supplier')
+            if await conn.fetchval("SELECT COUNT(*) FROM lightspeed_review_jobs WHERE product_id=ANY($1::varchar[]) AND status='running'",affected):raise HTTPException(409,'An export job is running for this category')
+            await conn.execute("""INSERT INTO supplier_category_policies(store_domain,supplier_id,category_id,pricing_mode,pricing_value,weight_lb,length_in,width_in,height_in)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(store_domain,supplier_id,category_id) DO UPDATE SET
+                pricing_mode=EXCLUDED.pricing_mode,pricing_value=EXCLUDED.pricing_value,weight_lb=EXCLUDED.weight_lb,
+                length_in=EXCLUDED.length_in,width_in=EXCLUDED.width_in,height_in=EXCLUDED.height_in,updated_at=NOW()""",
+                domain,body.supplier_id,body.category_id,body.mode,value,values['weight_lb'],values['length_in'],values['width_in'],values['height_in'])
+            await conn.execute("UPDATE products SET lightspeed_sync_status=CASE WHEN lightspeed_sync_status='images_pending' THEN 'images_pending' ELSE 'pending' END,updated_at=NOW() WHERE id=ANY($1::varchar[])",affected)
+            await conn.execute("UPDATE product_sync_status SET sync_status='pending',updated_at=NOW() WHERE product_id=ANY($1::varchar[])",affected)
+    return {'success':True,'affected_products':len(affected)}
+
+
+@router.put('/preprocessing/products/{product_id}/pricing')
+async def removed_product_pricing(product_id: str,user=Depends(get_admin_user)):
+    raise HTTPException(410,'Product pricing is removed. Use category defaults in Category Mapping.')
+
+
+@router.post('/preprocessing/validate-products')
+async def validate_products_for_sync(data: dict=None, user: dict=Depends(get_current_user)):
+    async with deps.pool.acquire() as conn:
+        products=await catalog(conn,supplier_id=(data or {}).get('supplier_id'))
+        selected=(data or {}).get('product_ids',[])
+        if selected: products=[p for p in products if p['id'] in selected]
+        states=await load_readiness(conn,products)
+    valid=sum(s['is_valid'] for s in states.values())
+    return {'success':True,'total':len(products),'validated':valid,'invalid':len(products)-valid}
 
 
 @router.post("/preprocessing/sync-to-odoo")
@@ -123,7 +239,7 @@ async def sync_preprocessed_to_odoo(data: dict = None, user: dict = Depends(get_
         settings_row = await conn.fetchrow("SELECT * FROM settings WHERE id = 'system_settings'")
         if not settings_row: raise HTTPException(400, "Settings not configured")
         settings = row_to_dict(settings_row)
-        markup = float(settings.get('markup_percentage') or 40)
+        markup = float(settings['markup_percentage']) if settings.get('markup_percentage') is not None else 40.0
         odoo = OdooService(settings.get('odoo_url'), settings.get('odoo_db'), settings.get('odoo_username'), settings.get('odoo_api_key'))
         conn_test = odoo.test_connection()
         if not conn_test.get('connected'): raise HTTPException(400, f"Odoo connection failed: {conn_test.get('message')}")
@@ -163,145 +279,89 @@ async def sync_preprocessed_to_odoo(data: dict = None, user: dict = Depends(get_
         return {"success": True, "total": len(products), "synced": synced, "failed": failed, "errors": errors[:10]}
 
 
-@router.post("/preprocessing/sync-to-lightspeed")
-async def sync_preprocessed_to_lightspeed(data: dict = None, user: dict = Depends(get_current_user)):
-    from lightspeed_service import LightspeedService
-    product_ids = data.get('product_ids', []) if data else []
-    sync_all = data.get('sync_all', False) if data else False
+@router.post('/preprocessing/sync-to-lightspeed')
+async def sync_preprocessed_to_lightspeed(data: dict=None, user: dict=Depends(get_current_user)):
+    await ensure_pricing_schema()
+    from routes.lightspeed import _get_ls_service
+    from export_safety import export_product
+    ls=await _get_ls_service()
+    if ls.mock_mode: raise HTTPException(400,'Configure Lightspeed first')
+    supplier_id=(data or {}).get('supplier_id') or None
+    selected=(data or {}).get('product_ids',[])
+    all_ready=(data or {}).get('sync_all',False)
+    if not selected and not all_ready: raise HTTPException(400,'Select products first')
     async with deps.pool.acquire() as conn:
-        settings_row = await conn.fetchrow("SELECT * FROM settings WHERE id = 'system_settings'")
-        if not settings_row: raise HTTPException(400, "Settings not configured")
-        settings = row_to_dict(settings_row)
-        markup = float(settings.get('markup_percentage') or 40)
-
-        ls = LightspeedService(
-            domain_prefix=settings.get('lightspeed_store_id', ''),
-            personal_token=settings.get('lightspeed_secret_token', ''),
-            access_token=settings.get('lightspeed_access_token', ''),
-            client_id=settings.get('lightspeed_client_id', ''),
-            client_secret=settings.get('lightspeed_client_secret', ''),
-            refresh_token=settings.get('lightspeed_refresh_token', ''),
-            token_expires_at=settings.get('lightspeed_token_expires_at'),
-        )
-        conn_test = ls.test_connection()
-        if not conn_test.get('connected'): raise HTTPException(400, f"Lightspeed connection failed: {conn_test.get('message')}")
-
-        if sync_all:
-            products = await conn.fetch('''
-                SELECT p.*, cm.lightspeed_category_id, s.supplier_name, pss.sale_price
-                FROM products p
-                INNER JOIN category_mapping cm ON p.category = cm.supplier_category_name
-                LEFT JOIN suppliers s ON p.supplier_id = s.id
-                LEFT JOIN product_sync_status pss ON p.id = pss.product_id
-                WHERE cm.lightspeed_category_id IS NOT NULL AND p.base_price > 0
-                AND (p.lightspeed_sync_status != 'synced' OR p.lightspeed_sync_status IS NULL)
-            ''')
-        elif product_ids:
-            products = await conn.fetch('''
-                SELECT p.*, cm.lightspeed_category_id, s.supplier_name, pss.sale_price
-                FROM products p
-                LEFT JOIN category_mapping cm ON p.category = cm.supplier_category_name
-                LEFT JOIN suppliers s ON p.supplier_id = s.id
-                LEFT JOIN product_sync_status pss ON p.id = pss.product_id
-                WHERE p.id = ANY($1)
-            ''', product_ids)
-        else:
-            return {"success": False, "error": "No products specified"}
-
-        synced = 0; failed = 0; errors = []
-        for p in products:
-            product = row_to_dict(p)
-            try:
-                cost = float(product.get('base_price') or 0)
-                sale_price = product.get('sale_price') or calculate_sale_price(cost, markup)
-                supplier_name = product.get('supplier_name', '')
-
-                variants = await conn.fetch("SELECT * FROM product_variants WHERE product_id = $1", product['id'])
-                images = await conn.fetch("SELECT * FROM product_media WHERE product_id = $1", product['id'])
-
-                ls_data = {
-                    'product_name': product.get('product_name'),
-                    'supplier_sku': product.get('supplier_sku'),
-                    'description': product.get('description'),
-                    'product_id': product['id'],
-                    # Brand
-                    'brand_name': product.get('brand'),
-
-                    # Pricing
-                    'base_price': float(sale_price),
-                    'cost_price': cost,
-                    'calculated_sale_price': float(sale_price),
-                    'sale_price': float(sale_price),
-                    'retail_price': float(sale_price),
-
-                    # ONLY use manually mapped Lightspeed category
-                    'category_id': product.get('lightspeed_category_id'),
-
-                    # Supplier from SupplierHub
-                    'supplier_name': supplier_name,
-
-                    # Variants + media
-                    'variants': [row_to_dict(v) for v in variants],
-                    'images': [row_to_dict(i) for i in images],
-                }
-                result = await ls.create_or_update_product(ls_data)
+        settings=await conn.fetchrow("SELECT markup_percentage FROM settings WHERE id='system_settings'")
+        markup=float(settings['markup_percentage']) if settings and settings['markup_percentage'] is not None else 40.0
+        if supplier_id and not await conn.fetchval('SELECT 1 FROM suppliers WHERE id=$1',supplier_id):raise HTTPException(404,'Supplier not found')
+        candidates=await catalog(conn,supplier_id=supplier_id)
+        if selected and set(selected)-{p['id'] for p in candidates}:raise HTTPException(400,'Selected products do not belong to the selected supplier or no longer exist')
+        if selected: candidates=[p for p in candidates if p['id'] in selected]
+        states=await load_readiness(conn,candidates)
+        products=[p for p in candidates if states[p['id']]['can_sync']]
+        skipped=[{'product_id':p['id'],'sku':p.get('supplier_sku'),'error':'; '.join(states[p['id']]['validation_errors']) or 'Already synced'} for p in candidates if not states[p['id']]['can_sync']]
+    synced,errors,needs_review=0,[],[]
+    for product in products:
+        # Recheck source state immediately before each write; stale UI cannot bypass it.
+        try:
+            async with deps.pool.acquire() as conn:
+                current=await conn.fetchrow('SELECT p.*,s.supplier_name FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE p.id=$1',product['id'])
+                if not current: raise ValueError('Product was removed')
+                product=row_to_dict(current)
+                state=(await load_readiness(conn,[product]))[product['id']]
+            if supplier_id and product.get('supplier_id') != supplier_id: raise ValueError('Product supplier changed; reload Pre-processing')
+            if not state['can_sync']: raise ValueError('; '.join(state['validation_errors']) or 'Already synced')
+            product['lightspeed_category_id']=state['mapped_lightspeed_category_id']
+            # Full Sync Selected must reconcile destinations even when only images were pending.
+            # Image-only repair remains an explicit Export Review action.
+            result=await export_product(ls,product,state['variants'],state['images'],markup,state['mapped_lightspeed_category_id'])
+            async with deps.pool.acquire() as conn:
                 if result.get('success'):
-                    await conn.execute(
-                        "UPDATE products SET lightspeed_sync_status='synced', lightspeed_product_id=$1, updated_at=NOW() WHERE id=$2",
-                        str(result.get('lightspeed_id', '')), product['id'])
-                    await conn.execute("""
-                        INSERT INTO product_sync_status (id, product_id, sync_status, last_sync_date, updated_at)
-                        VALUES ($1, $2, 'synced', NOW(), NOW())
-                        ON CONFLICT (product_id) DO UPDATE SET sync_status='synced', last_sync_date=NOW(), updated_at=NOW()
-                    """, new_id(), product['id'])
-                    synced += 1
+                    warnings=result.get('image_warnings') or []
+                    await conn.execute("UPDATE products SET lightspeed_product_id=$2,lightspeed_sync_status=$3,updated_at=NOW() WHERE id=$1",product['id'],str(result['lightspeed_id']),'images_pending' if warnings else 'synced')
+                    if warnings: needs_review.append({'product_id':product['id'],'sku':product.get('supplier_sku'),'error':'; '.join(warnings)})
+                    else: synced+=1
                 else:
-                    await conn.execute("UPDATE products SET lightspeed_sync_status='failed', updated_at=NOW() WHERE id=$1", product['id'])
-                    failed += 1; errors.append({'product_id': product['id'], 'sku': product.get('supplier_sku'), 'error': result.get('error')})
-            except Exception as e:
-                logger.error(f"Error syncing {product.get('supplier_sku')} to Lightspeed: {e}")
-                failed += 1; errors.append({'product_id': product['id'], 'sku': product.get('supplier_sku'), 'error': str(e)})
-
-        # Persist refreshed token if applicable
-        if ls.token_was_refreshed:
-            await conn.execute("""
-                UPDATE settings SET lightspeed_access_token = $1, lightspeed_token_expires_at = $2, updated_at = NOW()
-                WHERE id = 'system_settings'
-            """, ls.access_token, ls.token_expires_at)
-
-    return {"success": True, "total": len(products), "synced": synced, "failed": failed, "errors": errors[:10]}
-
+                    await conn.execute("UPDATE products SET lightspeed_sync_status='failed',updated_at=NOW() WHERE id=$1",product['id'])
+                    errors.append({'product_id':product['id'],'sku':product.get('supplier_sku'),'error':result.get('error')})
+        except Exception as exc:
+            async with deps.pool.acquire() as conn:
+                await conn.execute("UPDATE products SET lightspeed_sync_status='failed',updated_at=NOW() WHERE id=$1",product['id'])
+            logger.exception('Lightspeed export failed for %s',product.get('supplier_sku'))
+            errors.append({'product_id':product['id'],'sku':product.get('supplier_sku'),'error':str(exc)})
+    return {'success':not errors and not needs_review,'total':len(products),'synced':synced,'failed':len(errors),'needs_review':0,'images_pending':len(needs_review),'skipped':len(skipped),'errors':errors[:50],'image_pending_products':needs_review[:50],'skipped_products':skipped[:50]}
 
 
 @router.get("/preprocessing/product/{product_id}/preview")
 async def preview_product_for_odoo(product_id: str, user: dict = Depends(get_current_user)):
+    await ensure_pricing_schema()
     async with deps.pool.acquire() as conn:
         settings = await conn.fetchrow("SELECT markup_percentage FROM settings WHERE id = 'system_settings'")
-        markup = float(settings['markup_percentage']) if settings else 40.0
+        markup = float(settings['markup_percentage']) if settings and settings['markup_percentage'] is not None else 40.0
         product = await conn.fetchrow("SELECT * FROM products WHERE id = $1", product_id)
         if not product: raise HTTPException(404, "Product not found")
         product = row_to_dict(product)
-        mapping = await conn.fetchrow('SELECT cm.*, oc.category_name as odoo_category_name FROM category_mapping cm LEFT JOIN odoo_categories oc ON cm.odoo_category_id = oc.odoo_category_id WHERE cm.supplier_category_name = $1', product.get('category',''))
-        variants = await conn.fetch("SELECT * FROM product_variants WHERE product_id = $1 ORDER BY color, size", product_id)
-        images = await conn.fetch("SELECT * FROM product_media WHERE product_id = $1", product_id)
-        cost_price = float(product.get('base_price') or 0); sale_price = calculate_sale_price(cost_price, markup)
+        readiness=(await load_readiness(conn,[product]))[product_id]
+        variants = readiness['variants']
+        images = readiness['images']
+        product=apply_category_policy(product,readiness['mapped_lightspeed_category_id'],await category_policies(conn))
+        policy = pricing_policy(product, variants, markup)
+        cost_price = policy['anchor_cost']; sale_price = price_for(cost_price, policy)
         preview = {
             "product_template": {
-                "name": product.get('product_name'), "default_code": product.get('supplier_sku'),
+                "name": export_name(product.get('product_name'),product.get('supplier_sku')), "default_code": product.get('supplier_sku'),
                 "description": product.get('description'), "list_price": sale_price, "standard_price": cost_price,
-                "categ_id": mapping['odoo_category_id'] if mapping else None,
-                "category_name": mapping['odoo_category_name'] if mapping else "Not Mapped",
+                "categ_id": readiness['mapped_lightspeed_category_id'],
+                "category_name": readiness.get('mapped_category_name') or "Not Mapped",
                 "type": "product", "sale_ok": True, "purchase_ok": True,
             },
             "attributes": {
                 "colors": list(set(v['color'] for v in variants if v.get('color'))),
-                "sizes": list(set(v['size'] for v in variants if v.get('size'))),
+                "sizes": sorted(set(v['size'] for v in readiness['variants'] if v.get('size')),key=size_key),
             },
-            "variants": [{"sku": v['variant_sku'], "color": v.get('color'), "size": v.get('size'), "price": float(v.get('price') or sale_price), "inventory": v.get('inventory',0)} for v in variants],
+            "variants": [{"sku": v['variant_sku'], "color": v.get('color'), "size": v.get('size'), "price": float(v['price']), "retail_price": price_for(v['price'],policy), "inventory": v.get('inventory',0)} for v in variants],
             "images": [{"url": img['url'], "type": img.get('media_type','image'), "is_primary": img.get('is_primary',False)} for img in images],
-            "validation": {"is_valid": bool(mapping and cost_price > 0), "errors": []}
+            "validation": {"is_valid": bool(readiness['mapped_lightspeed_category_id'] and cost_price > 0), "errors": []}
         }
-        if not mapping: preview["validation"]["errors"].append("Category not mapped")
-        if cost_price <= 0: preview["validation"]["errors"].append("Invalid price")
-        if len(images) == 0: preview["validation"]["errors"].append("No images")
+        preview['validation']={'is_valid':readiness['is_valid'],'errors':readiness['validation_errors']}
         return preview

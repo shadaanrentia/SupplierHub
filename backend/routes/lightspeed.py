@@ -27,8 +27,11 @@ async def _get_lightspeed_settings():
 
 async def _get_ls_service():
     from lightspeed_service import LightspeedService
+
     s = await _get_lightspeed_settings()
-    ls = LightspeedService(
+
+    ls = await asyncio.to_thread(
+        LightspeedService,
         domain_prefix=s.get("lightspeed_store_id") or "",
         personal_token=s.get("lightspeed_secret_token") or "",
         access_token=s.get("lightspeed_access_token") or "",
@@ -37,13 +40,24 @@ async def _get_ls_service():
         refresh_token=s.get("lightspeed_refresh_token") or "",
         token_expires_at=s.get("lightspeed_token_expires_at"),
     )
+
     if ls.token_was_refreshed:
         async with deps.pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE settings
-                SET lightspeed_access_token = $1, lightspeed_token_expires_at = $2, updated_at = $3
+                SET lightspeed_access_token = $1,
+                    lightspeed_refresh_token = $2,
+                    lightspeed_token_expires_at = $3,
+                    updated_at = $4
                 WHERE id = 'system_settings'
-            """, ls.access_token, ls.token_expires_at, utc_now())
+                """,
+                ls.access_token,
+                ls.refresh_token,
+                ls.token_expires_at,
+                utc_now(),
+            )
+
     return ls
 
 @router.get("/lightspeed/oauth/authorize")
@@ -147,9 +161,11 @@ async def test_lightspeed_connection(user: dict = Depends(get_current_user)):
     return result
 
 @router.get("/categories/lightspeed")
-async def get_lightspeed_categories(user: dict = Depends(get_current_user)):
+async def get_lightspeed_categories(
+    user: dict = Depends(get_current_user),
+):
     ls = await _get_ls_service()
-    return ls.get_categories()
+    return await asyncio.to_thread(ls.get_categories)
 
 @router.post("/sync/lightspeed/{supplier_id}")
 async def push_to_lightspeed(supplier_id: str, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
@@ -172,21 +188,34 @@ async def push_to_lightspeed(supplier_id: str, background_tasks: BackgroundTasks
     return {"status": "started", "log_id": log_id, "products_to_push": count}
 
 async def _process_lightspeed_product(ls, product, variants, images, markup):
+    from taxonomy_resolution import resolve_category
+    from export_safety import export_product
     product_data = row_to_dict(product)
-    cost = float(product_data.get("base_price") or 0)
-    sale_price = calculate_sale_price(cost, markup)
-    ls_data = {
-        "product_name": product_data.get("product_name"),
-        "supplier_sku": product_data.get("supplier_sku"),
-        "description": product_data.get("description"),
-        "base_price": sale_price,
-        "cost_price": cost,
-        "category_id": product_data.get("lightspeed_category_id"),
-        "supplier_name": product_data.get("supplier_name", ""),
-        "variants": [row_to_dict(v) for v in variants],
-        "images": [row_to_dict(img) for img in images],
-    }
-    return await ls.create_or_update_product(ls_data)
+    variant_data = [row_to_dict(v) for v in variants if v.get('is_active') is not False]
+    image_data = [row_to_dict(image) for image in images]
+    async with deps.pool.acquire() as conn:
+        managed, category_id, error = await resolve_category(
+            conn, product_data['supplier_id'], product_data['supplier_sku']
+        )
+    if managed and error:
+        return {'success': False, 'error': error}
+    if not managed:
+        async with deps.pool.acquire() as conn:
+            category_id = await conn.fetchval('''
+                SELECT lightspeed_category_id FROM category_mapping
+                WHERE supplier_category_name=$1
+                  AND lightspeed_category_id IS NOT NULL
+                  AND lightspeed_category_id<>''
+                ORDER BY updated_at DESC LIMIT 1
+            ''', product_data.get('category') or '')
+    if not category_id:
+        return {'success': False, 'error': 'Map or publish the Lightspeed category first'}
+    try:
+        return await export_product(ls, product_data, variant_data, image_data, markup, category_id)
+    except ValueError as exc:
+        return {'success': False, 'error': str(exc)}
+
+
 
 async def lightspeed_push_task(supplier_id: str, log_id: str):
     from lightspeed_service import LightspeedService
@@ -194,7 +223,7 @@ async def lightspeed_push_task(supplier_id: str, log_id: str):
         async with deps.pool.acquire() as conn:
             settings_row = await conn.fetchrow("SELECT * FROM settings WHERE id = 'system_settings'")
             settings = row_to_dict(settings_row)
-            markup = float(settings.get("markup_percentage") or 40)
+            markup = float(settings["markup_percentage"]) if settings.get("markup_percentage") is not None else 40.0
             products = await conn.fetch("""
                 SELECT p.*, cm.lightspeed_category_id, s.supplier_name
                 FROM products p
@@ -231,11 +260,11 @@ async def lightspeed_push_task(supplier_id: str, log_id: str):
         async with deps.pool.acquire() as conn:
             variants_rows = await conn.fetch("""
                 SELECT * FROM product_variants
-                WHERE product_id = ANY($1::uuid[])
+                WHERE product_id = ANY($1::varchar[])
             """, product_ids)
             media_rows = await conn.fetch("""
                 SELECT * FROM product_media
-                WHERE product_id = ANY($1::uuid[])
+                WHERE product_id = ANY($1::varchar[])
             """, product_ids)
         variants_by_product = {}
         for variant in variants_rows:

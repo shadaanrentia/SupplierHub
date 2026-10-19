@@ -1,5 +1,6 @@
 """Supplier routes: CRUD, test, catalog, import."""
 import json
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 import deps
@@ -84,14 +85,14 @@ async def delete_supplier(supplier_id: str, user: dict = Depends(get_admin_user)
 
 @router.post("/suppliers/{supplier_id}/test")
 async def test_supplier(supplier_id: str, user: dict = Depends(get_current_user)):
-    from promostandards import PromoStandardsConnector
+    from multi_supplier.connector import make_connector
     async with deps.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM suppliers WHERE id = $1", supplier_id)
         if not row:
             raise HTTPException(404, "Supplier not found")
         supplier = row_to_dict(row)
-        connector = PromoStandardsConnector(supplier)
-        return connector.test_connection()
+        connector = make_connector(supplier)
+        return await asyncio.to_thread(connector.test_connection)
 
 
 @router.get("/suppliers/{supplier_id}/catalog")
@@ -102,7 +103,7 @@ async def search_supplier_catalog(
     get_details: bool = Query(False),
     user: dict = Depends(get_current_user)
 ):
-    from promostandards import PromoStandardsConnector
+    from multi_supplier.connector import make_connector
     async with deps.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM suppliers WHERE id = $1", supplier_id)
         if not row:
@@ -110,8 +111,9 @@ async def search_supplier_catalog(
         supplier = row_to_dict(row)
         existing_rows = await conn.fetch("SELECT supplier_sku FROM products WHERE supplier_id = $1", supplier_id)
         existing_skus = set(r['supplier_sku'] for r in existing_rows)
-    connector = PromoStandardsConnector(supplier)
-    result = connector.get_sellable_products()
+    connector = make_connector(supplier)
+    connector.discovery_limit=limit
+    result = await asyncio.to_thread(connector.get_sellable_products)
     if not result.get('success'):
         raise HTTPException(500, f"Failed to fetch catalog: {result.get('error')}")
     all_products = result.get('products', [])
@@ -124,10 +126,10 @@ async def search_supplier_catalog(
     products = []
     if get_details:
         for sku in unique_skus:
-            product_data = connector.get_product(sku)
+            product_data = await asyncio.to_thread(connector.get_product,sku)
             if product_data.get('success') and product_data.get('product'):
                 p = product_data['product']
-                products.append({'supplier_sku': sku, 'product_name': p.get('name', ''), 'description': p.get('description', ''),
+                products.append({'supplier_sku': sku, 'product_name': p.get('product_name') or p.get('name',''), 'description': p.get('description', ''),
                     'brand': p.get('brand', ''), 'category': p.get('category', ''), 'variant_count': len(p.get('variants', [])), 'is_imported': sku in existing_skus})
     else:
         for sku in unique_skus:
@@ -137,7 +139,7 @@ async def search_supplier_catalog(
 
 @router.post("/suppliers/{supplier_id}/import-product/{product_sku}")
 async def import_product_from_catalog(supplier_id: str, product_sku: str, user: dict = Depends(get_current_user)):
-    from promostandards import PromoStandardsConnector
+    from multi_supplier.connector import make_connector
     async with deps.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM suppliers WHERE id = $1", supplier_id)
         if not row:
@@ -146,26 +148,14 @@ async def import_product_from_catalog(supplier_id: str, product_sku: str, user: 
         existing = await conn.fetchrow("SELECT id FROM products WHERE supplier_id = $1 AND supplier_sku = $2", supplier_id, product_sku)
         if existing:
             return {"success": False, "message": "Product already imported", "product_id": existing['id']}
-    connector = PromoStandardsConnector(supplier)
-    product_data = connector.get_product(product_sku)
+    connector = make_connector(supplier)
+    product_data = await asyncio.to_thread(connector.get_product,product_sku)
     if not product_data.get('success') or not product_data.get('product'):
         raise HTTPException(500, f"Failed to fetch product: {product_data.get('error', 'Unknown error')}")
     p = product_data['product']
-    product_id = new_id()
+    from routes.sync import apply_result
+    status,code,message=await apply_result(supplier_id,product_sku,'products',product_data)
+    if status=='failed':raise HTTPException(502,message)
     async with deps.pool.acquire() as conn:
-        await conn.execute('''
-            INSERT INTO products (id, supplier_id, supplier_sku, product_name, description, brand, category, base_price, last_synced, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9)
-        ''', product_id, supplier_id, product_sku, p.get('product_name', ''), p.get('description', ''),
-            p.get('brand', ''), p.get('category', ''), float(p.get('price', 0) or 0), utc_now())
-        variants_added = 0
-        for v in p.get('variants', []):
-            variant_id = new_id()
-            await conn.execute('''
-                INSERT INTO product_variants (id, product_id, variant_sku, color, size, price, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-            ''', variant_id, product_id, v.get('variant_sku', ''), v.get('color', ''), v.get('size', ''),
-                float(v.get('price', 0) or 0), utc_now())
-            variants_added += 1
-    return {"success": True, "message": f"Imported product with {variants_added} variants", "product_id": product_id,
-            "product_name": p.get('product_name', ''), "variants_added": variants_added}
+        product_id=await conn.fetchval('SELECT id FROM products WHERE supplier_id=$1 AND supplier_sku=$2',supplier_id,product_sku)
+    return {'success':True,'product_id':product_id,'product_name':p.get('product_name',''),'variants_added':len(p.get('variants',[])),'message':message}

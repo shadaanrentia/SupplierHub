@@ -16,6 +16,7 @@ import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import deps
+from export_format import EXPORT_BUILD, normalize_image_ack, description_html, description_text, inventory_quantity
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ API_VERSION = "2026-07"
 
 class LightspeedService:
     """Lightspeed Retail (X-Series) integration via REST API (date-based versioning)."""
+    export_build = EXPORT_BUILD
 
     def __init__(self, domain_prefix: str = '', personal_token: str = '',
                  access_token: str = '', client_id: str = '', client_secret: str = '',
@@ -338,56 +340,89 @@ class LightspeedService:
 
     # ==================== CATEGORIES ====================
     def get_categories(self) -> dict:
-        """Fetch all product categories. Response: data.data.categories[]"""
+        """Read the documented cursor-paginated 2026-07 category response."""
         if self.mock_mode:
             return {'success': False, 'error': 'Lightspeed not configured', 'categories': []}
         try:
-            all_categories = []
-            page = 1
+            result = []; after = None; seen_cursors = set(); seen_ids = set()
             while True:
-                data = self._get("product_categories", params={"page": page, "limit": 200})
-                # 2026-07 response: {data: {page_info: {...}, data: {categories: [...]}}}
-                inner = data.get("data", {})
-                cats_data = inner.get("data", {}).get("categories", [])
-                if not cats_data:
-                    # Fallback for older format: data: [...]
-                    if isinstance(inner, list):
-                        cats_data = inner
-                    else:
-                        break
-                all_categories.extend(cats_data)
-                page_info = inner.get("page_info", {})
-                if page_info.get("has_next"):
-                    page += 1
+                params = {'page_size': 1000}
+                if after:
+                    params['after'] = after
+                response = self._get('product_categories', params=params)
+                inner = response.get('data')
+                if isinstance(inner, list):
+                    cats = inner; page_info = response.get('page_info', {})
+                elif isinstance(inner, dict):
+                    nested = inner.get('data', inner)
+                    cats = nested.get('categories') if isinstance(nested, dict) else None
+                    page_info = response.get('page_info', inner.get('page_info', {}))
                 else:
+                    cats = None
+                if not isinstance(cats, list):
+                    raise ValueError('Unexpected Lightspeed category response')
+                for cat in cats:
+                    if not cat.get('id') or not cat.get('name'):
+                        raise ValueError('Category response is missing id/name')
+                    if cat['id'] in seen_ids:
+                        continue
+                    seen_ids.add(cat['id'])
+                    result.append({
+                        'lightspeed_category_id': cat['id'], 'category_name': cat['name'],
+                        'parent_id': cat.get('parent_category_id'),
+                        'root_category_id': cat.get('root_category_id'),
+                        'leaf_category': cat.get('leaf_category', False),
+                        'category_path': cat.get('category_path', []), 'is_visible': True,
+                    })
+                if not page_info.get('has_next'):
                     break
-
-            result = []
-            for cat in all_categories:
-                result.append({
-                    'lightspeed_category_id': cat.get('id'),
-                    'category_name': cat.get('name', ''),
-                    'parent_id': cat.get('parent_category_id'),
-                    'root_category_id': cat.get('root_category_id'),
-                    'leaf_category': cat.get('leaf_category', False),
-                    'category_path': cat.get('category_path', []),
-                    'is_visible': True,
-                })
-            logger.info(f"Fetched {len(result)} categories from Lightspeed")
+                after = page_info.get('last_seen')
+                if not after or after in seen_cursors:
+                    raise ValueError('Invalid/repeated Lightspeed category pagination cursor')
+                seen_cursors.add(after)
+            parents = {c['parent_id'] for c in result if c['parent_id']}
+            for cat in result:
+                cat['leaf_category'] = cat['lightspeed_category_id'] not in parents
             return {'success': True, 'categories': result}
         except Exception as e:
-            logger.error(f"Error fetching Lightspeed categories: {e}")
             return {'success': False, 'error': str(e), 'categories': []}
 
-    def create_category(self, name: str) -> dict:
+    def create_category(self, name: str, parent_id: str = None) -> dict:
+        """Create one node with the documented bulk hierarchy endpoint."""
         if self.mock_mode:
             return {'success': False, 'error': 'Lightspeed not configured'}
         try:
-            data = self._post("product_categories", {'name': name})
-            cat = data.get('data', data)
-            return {'success': True, 'id': cat.get('id'), 'title': cat.get('name', name)}
+            payload = {'name': name}
+            if parent_id:
+                payload['parent_category_id'] = parent_id
+            response = self._post('product_categories/bulk', {'categories': [payload]})
+            if response.get('_lightspeed_validation_error'):
+                return {'success': False, 'error': str(response)}
+            cats = response.get('data')
+            if not isinstance(cats, list) or len(cats) != 1 or not cats[0].get('id'):
+                raise ValueError('Category creation returned no issued category ID; refresh before retry')
+            return {'success': True, 'id': cats[0]['id'], 'title': cats[0].get('name', name)}
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    def update_product_category(self, product_id: str, category_id: str) -> dict:
+        """Update the family common category only; no prices, stock, media or names."""
+        if self.mock_mode:
+            return {'success': False, 'error': 'Lightspeed not configured'}
+        try:
+            response = self._put_legacy_21(f'products/{product_id}', {
+                'common': {'product_category_id': category_id}
+            })
+            if response.get('_lightspeed_validation_error'):
+                return {'success': False, 'error': str(response)}
+            actual = (response.get('data') or {}).get('common', {}).get('product_category_id')
+            if actual != category_id:
+                raise ValueError('Lightspeed did not confirm the assigned category')
+            return {'success': True, 'category_id': actual}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+
 
     # ==================== BRANDS ====================
 
@@ -750,6 +785,15 @@ class LightspeedService:
                 or 0
             )
             variants = product.get("variants", [])
+            from export_safety import positive
+            if not positive(cost_price) or not positive(sale_price):
+                return {'success': False, 'error': 'Refusing to send an invalid product price'}
+            if len(variants) > 200:
+                return {'success': False, 'error': 'Use a saved split plan for more than 200 variants'}
+            if any(v.get('price_needs_review') or not positive(v.get('price')) for v in variants):
+                return {'success': False, 'error': 'Refusing to send invalid or unverified variant prices'}
+
+            for variant in variants: inventory_quantity(variant)
             supplier_name = product.get("supplier_name", "")
             images = product.get("images", [])
             logger.info(
@@ -781,7 +825,69 @@ class LightspeedService:
                 f"Supplier={supplier_name} (ID={ls_supplier_id}), "
                 f"Brand={brand_name} (ID={ls_brand_id})"
             )
-            existing_product_id = await asyncio.to_thread(self._find_product_by_sku, sku)
+            expected_skus = {str(v['variant_sku']).strip().lower() for v in variants}
+            owned_skus = set(expected_skus)
+            if product.get('product_id') and variants:
+                # Preserve previously exported/ineligible source variants without updating them.
+                # Only rows belonging to this exact local product prove ownership.
+                import deps
+                async with deps.pool.acquire() as conn:
+                    source_rows = await conn.fetch('SELECT variant_sku FROM product_variants WHERE product_id=$1', product['product_id'])
+                owned_skus.update(str(v['variant_sku']).strip().lower() for v in source_rows if v.get('variant_sku'))
+            existing_product_id = product.get("lightspeed_product_id")
+            if existing_product_id and await asyncio.to_thread(self.remote_product_deleted, str(existing_product_id)):
+                # Only a confirmed deletion permits recreation; network errors propagate.
+                candidates = await asyncio.to_thread(self.lookup_skus, [sku] + [v['variant_sku'] for v in variants])
+                if candidates:
+                    # Recovery must prove one live family owns the complete eligible set.
+                    replacement_id = str(next(iter(candidates.values()))['id'])
+                    family = await asyncio.to_thread(self.remote_family, replacement_id)
+                    from single_family import members
+                    remote = members(family, expected_skus=owned_skus)
+                    remote_ids = {str(v['id']) for v in remote.values()}
+                    if not variants or not expected_skus.issubset(remote) or not set(remote).issubset(owned_skus):
+                        raise ValueError('Deleted destination recovery blocked: ' + self.variant_mismatch_message(family, remote, variants))
+                    if not {str(v['id']) for v in candidates.values()}.issubset(remote_ids):
+                        raise ValueError('Deleted destination recovery blocked: source SKUs are in multiple families; candidates=' + ', '.join(str(v['id']) for v in candidates.values())[:1000])
+                    # A concurrent restoration or migration must not silently change ownership.
+                    if not await asyncio.to_thread(self.remote_product_deleted, str(existing_product_id)):
+                        raise ValueError('Destination changed during deletion verification')
+                    confirmed = await asyncio.to_thread(self.lookup_skus, [sku] + [v['variant_sku'] for v in variants])
+                    if {k: str(v['id']) for k, v in candidates.items()} != {k: str(v['id']) for k, v in confirmed.items()}:
+                        raise ValueError('Destination SKU ownership changed during recovery; retry after migration completes')
+                    logger.info('Reconnecting %s from deleted destination %s to verified live destination %s (family=%s, eligible=%s)', sku, existing_product_id, replacement_id, family.get('id'), len(expected_skus))
+                    existing_product_id = replacement_id
+                    # Save the verified replacement before price/stock/media writes so retries resume it.
+                    if product.get('product_id'):
+                        import deps
+                        async with deps.pool.acquire() as conn:
+                            await conn.execute('UPDATE products SET lightspeed_product_id=$2 WHERE id=$1', product['product_id'], replacement_id)
+                else:
+                    candidates = await asyncio.to_thread(self.lookup_skus, [sku] + [v['variant_sku'] for v in variants])
+                    if candidates:
+                        raise ValueError('Destination changed during deletion verification')
+                    existing_product_id = None
+                    import deps
+                    if product.get('product_id'):
+                        async with deps.pool.acquire() as conn:
+                            await conn.execute('UPDATE products SET lightspeed_product_id=NULL WHERE id=$1', product['product_id'])
+            if not existing_product_id:
+                candidates = await asyncio.to_thread(self.lookup_skus, [sku] + [v['variant_sku'] for v in variants])
+                if candidates:
+                    existing_product_id = str(next(iter(candidates.values()))['id'])
+                    family = await asyncio.to_thread(self.remote_family, existing_product_id)
+                    from single_family import members
+                    remote = members(family, expected_skus=owned_skus)
+                    if variants and (not expected_skus.issubset(remote) or not set(remote).issubset(owned_skus)):
+                        raise ValueError(self.variant_mismatch_message(family, remote, variants))
+                    if not {str(v['id']) for v in candidates.values()}.issubset({str(v['id']) for v in remote.values()}):
+                        raise ValueError('Source SKUs are in multiple families; automatic adoption blocked')
+            elif variants:
+                family = await asyncio.to_thread(self.remote_family, str(existing_product_id))
+                from single_family import members
+                remote = members(family, expected_skus=owned_skus)
+                if str(existing_product_id) not in {str(v['id']) for v in remote.values()} or not expected_skus.issubset(remote) or not set(remote).issubset(owned_skus):
+                    raise ValueError(self.variant_mismatch_message(family, remote, variants))
 
             if existing_product_id:
                 logger.info(
@@ -843,6 +949,10 @@ class LightspeedService:
                     "success": False,
                     "error": "Failed to get product ID from Lightspeed"
                 }
+            if product.get('product_id'):
+                import deps
+                async with deps.pool.acquire() as conn:
+                    await conn.execute('UPDATE products SET lightspeed_product_id=$2 WHERE id=$1', product['product_id'], str(ls_id))
             if variants and created:
                 await self._sync_existing_variants(
                     product_id=ls_id,
@@ -850,7 +960,8 @@ class LightspeedService:
                     retail_price=sale_price,
                     product_name=product.get("product_name", ""),
                     supplier_id=ls_supplier_id,
-                    enable_inventory_tracking=True
+                    enable_inventory_tracking=True,
+                    effective_markup_percentage=product.get("effective_markup_percentage")
                 )
             if created:
                 activated = await asyncio.to_thread(
@@ -863,28 +974,29 @@ class LightspeedService:
                         f"Failed to activate POS + Online Store "
                         f"for Lightspeed product {ls_id}"
                     )
-            if images and created:
-                self._image_executor.submit(
-                    self._upload_images,
+            image_results = None
+            if images:
+                from export_safety import repair_images
+                image_results = await repair_images(self, str(ls_id), images)
+            if product.get("category_id"):
+                category_result = await asyncio.to_thread(
+                    self.update_product_category,
                     ls_id,
-                    images
+                    str(product["category_id"]),
                 )
 
-                logger.info(
-                    f"Image sync queued for newly created "
-                    f"Lightspeed product {ls_id}: "
-                    f"{len(images)} images"
-                )
+                if not category_result.get("success"):
+                    return {
+                        "success": False,
+                        "error": category_result.get("error"),
+                        "lightspeed_id": str(ls_id),
+                    }
 
-            elif images:
-                logger.info(
-                    f"Skipping image upload for existing "
-                    f"Lightspeed product {ls_id}"
-                )
             return {
                 "success": True,
                 "lightspeed_id": str(ls_id),
-                "created": created
+                "created": created,
+                "image_results": image_results,
             }
         except requests.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
@@ -935,7 +1047,9 @@ class LightspeedService:
         retail_price: float,
         product_name: str = "",
         supplier_id: str = None,
-        enable_inventory_tracking: bool = False
+        enable_inventory_tracking: bool = False,
+        effective_markup_percentage: float = None,
+        remote_snapshot: dict = None
     ):
         """
         Sync SupplierHub variants to Lightspeed.
@@ -949,7 +1063,7 @@ class LightspeedService:
         - Update price and inventory for each Lightspeed variant
         """
         # Load markup configured in SupplierHub Settings
-        markup_percentage = await self._get_markup_percentage()
+        markup_percentage = float(effective_markup_percentage) if effective_markup_percentage is not None else await self._get_markup_percentage()
 
         logger.info(
             f"Variant sync using markup: {markup_percentage}%"
@@ -982,7 +1096,7 @@ class LightspeedService:
                     f"Unable to determine Lightspeed product name "
                     f"for {product_id}"
                 )
-                return
+                raise ValueError("Cannot verify complete variant synchronization")
 
             logger.info(
                 f"Loading Lightspeed variant family for "
@@ -993,18 +1107,10 @@ class LightspeedService:
             # 2. GET ALL LIGHTSPEED FAMILY MEMBERS
             # =========================================================
 
-            family_response = self._get(
-                "products",
-                params={
-                    "name": product_name,
-                    "page_size": 200
-                }
-            )
-
-            family_items = family_response.get(
-                "data",
-                []
-            )
+            family_response = remote_snapshot or await asyncio.to_thread(self.remote_family, str(product_id))
+            from single_family import members
+            family_response = dict(family_response, products=list(members(family_response, expected_skus=[v.get('variant_sku') or v.get('sku') for v in supplier_variants]).values()))
+            family_items = family_response.get('products', [])
 
             if isinstance(family_items, dict):
                 family_items = (
@@ -1022,7 +1128,7 @@ class LightspeedService:
                     f"No Lightspeed family members found for "
                     f"'{product_name}'"
                 )
-                return
+                raise ValueError("Cannot verify complete variant synchronization")
 
             logger.info(
                 f"Found {len(family_items)} Lightspeed variants "
@@ -1075,7 +1181,7 @@ class LightspeedService:
                     "No Lightspeed inventory outlet could be resolved. "
                     "Inventory synchronization aborted."
                 )
-                return
+                raise ValueError("Cannot verify complete variant synchronization")
 
             logger.info(
                 f"Using Lightspeed inventory outlet: {outlet_id}"
@@ -1120,9 +1226,15 @@ class LightspeedService:
             # Do NOT put it inside "details".
             # =========================================================
 
+            # Details.product_suppliers may only set costs for suppliers already
+            # assigned to this family through common.product_suppliers.
+            # Verify once before launching updates, rather than failing every variant.
+            if supplier_id:
+                await asyncio.to_thread(self._ensure_family_supplier, str(product_id), str(supplier_id))
+
             inventory_tracking_enabled = True
 
-            if enable_inventory_tracking:
+            if enable_inventory_tracking and family_response.get('track_inventory') is not True:
 
                 enable_inventory_payload = {
                     "common": {
@@ -1168,6 +1280,10 @@ class LightspeedService:
             not_found = 0
             skipped = 0
 
+            from shipping_measurements import source_measurements
+            # Validate the complete batch before creating coroutine tasks or writing variants.
+            shipping_by_sku = {k: source_measurements(v) for k, v in supplier_by_sku.items()}
+
             for source_sku, supplier_variant in supplier_by_sku.items():
                 target = lightspeed_by_sku.get(source_sku)
                 if not target:
@@ -1183,18 +1299,7 @@ class LightspeedService:
                     not_found += 1
                     continue
 
-                inventory = (
-                    supplier_variant.get("inventory")
-                    or supplier_variant.get("inventory_count")
-                    or supplier_variant.get("quantity")
-                    or supplier_variant.get("stock")
-                    or 0
-                )
-
-                try:
-                    inventory = max(0, int(float(inventory)))
-                except (TypeError, ValueError):
-                    inventory = 0
+                inventory = inventory_quantity(supplier_variant)
 
                 supplier_variant_price = float(
                     supplier_variant.get("price")
@@ -1203,10 +1308,8 @@ class LightspeedService:
                     or 0
                 )
 
-                variant_price = round(
-                    supplier_variant_price * (1 + markup_percentage / 100),
-                    2
-                )
+                from pricing_rules import variant_retail
+                variant_price = variant_retail(supplier_variant, markup_percentage)
 
                 try:
                     variant_price = float(variant_price)
@@ -1247,13 +1350,12 @@ class LightspeedService:
                         }
                     ]
 
-                tasks.append(
-                    self._sync_single_variant(
-                        ls_variant_id,
-                        variant_sku,
-                        update_payload
-                    )
-                )
+                shipping = shipping_by_sku[source_sku]
+                if shipping:
+                    tasks.append(self._sync_single_variant(ls_variant_id, variant_sku, update_payload,
+                        measurements=shipping, measurement_snapshot=target.get('measurements')))
+                else:
+                    tasks.append(self._sync_single_variant(ls_variant_id, variant_sku, update_payload))
 
             # =========================================================
             # 8. EXECUTE VARIANT UPDATES CONCURRENTLY
@@ -1292,6 +1394,9 @@ class LightspeedService:
                 f"InventoryTrackingEnabled={inventory_tracking_enabled}"
             )
 
+            if failed or not_found or skipped or not inventory_tracking_enabled or synced != len(supplier_variants):
+                raise ValueError(f"Incomplete variant sync: synced={synced}, missing={not_found}, failed={failed}, skipped={skipped}")
+
         except Exception as e:
 
             logger.error(
@@ -1299,8 +1404,69 @@ class LightspeedService:
                 f"{product_id}: {e}",
                 exc_info=True
             )
+            raise
 
-    async def _sync_single_variant(self, ls_variant_id: str, variant_sku: str, update_payload: dict):
+    def _read_product_suppliers(self, product_id):
+        """Read the documented 2.0 supplier links; omitted lists are not empty lists."""
+        self._throttle()
+        response = requests.get(
+            f'https://{self.domain_prefix}.retail.lightspeed.app/api/2.0/products/{product_id}',
+            headers=self._headers(), timeout=120
+        )
+        self._handle_rate_limit(response)
+        result = self._handle_response(response)
+        row = result.get('data') if isinstance(result, dict) else None
+        if not isinstance(row, dict) or str(row.get('id') or '') != str(product_id):
+            raise ValueError('Cannot verify product supplier links for ' + str(product_id))
+        links = row.get('product_suppliers')
+        if not isinstance(links, list) or any(not isinstance(v, dict) or not v.get('supplier_id') for v in links):
+            raise ValueError('Supplier links missing or invalid; refusing to replace family suppliers')
+        return links
+
+    def _ensure_family_supplier(self, product_id, supplier_id):
+        """Assign the family supplier before per-variant costs, retaining other suppliers."""
+        links = self._read_product_suppliers(product_id)
+        wanted = str(supplier_id)
+        existing = list(dict.fromkeys(str(v['supplier_id']) for v in links))
+        if wanted in existing:
+            return
+        payload = {'common': {'product_suppliers': [
+            {'supplier_id': sid} for sid in existing + [wanted]
+        ]}}
+        result = self._put_legacy_21(f'products/{product_id}', payload)
+        if not isinstance(result, dict) or result.get('_lightspeed_validation_error'):
+            raise ValueError('Family supplier assignment failed before variant sync: ' + str(result)[:1000])
+        confirmed = {str(v['supplier_id']) for v in self._read_product_suppliers(product_id)}
+        if not set(existing + [wanted]).issubset(confirmed):
+            raise ValueError('Family supplier assignment not confirmed; variant sync stopped')
+        logger.info('Verified family supplier %s for product %s; retained %s existing supplier(s)', wanted, product_id, len(existing))
+
+    def _sync_measurements(self, product_id, desired, snapshot=None):
+        from shipping_measurements import measurements_match
+        if measurements_match(snapshot, desired):
+            return False
+        if not isinstance(snapshot, dict):
+            response = self.family_request('GET', f'products/{product_id}')
+            row = response.get('data')
+            if not isinstance(row, dict) or str(row.get('id') or '') != str(product_id):
+                raise ValueError('Cannot verify measurement destination ' + str(product_id))
+            snapshot = row.get('measurements')
+            if not isinstance(snapshot, dict):
+                raise ValueError('Destination response omits measurements; refusing to overwrite unknown values')
+        if measurements_match(snapshot, desired):
+            return False
+        allowed = {'weight', 'weight_unit', 'dimensions_length', 'dimensions_width', 'dimensions_height', 'dimensions_unit'}
+        merged = {k: v for k, v in snapshot.items() if k in allowed and v is not None}
+        merged.update(desired)
+        self.family_request('PATCH', f'products/{product_id}', {'measurements': merged})
+        response = self.family_request('GET', f'products/{product_id}')
+        row = response.get('data')
+        if not isinstance(row, dict) or str(row.get('id') or '') != str(product_id) or not measurements_match(row.get('measurements'), desired):
+            raise ValueError('Shipping measurements were not confirmed for ' + str(product_id))
+        logger.info('Shipping measurements verified for variant %s: %s', product_id, desired)
+        return True
+
+    async def _sync_single_variant(self, ls_variant_id: str, variant_sku: str, update_payload: dict, measurements=None, measurement_snapshot=None):
         async with self._variant_sync_semaphore:
             try:
                 result = await asyncio.to_thread(
@@ -1317,6 +1483,8 @@ class LightspeedService:
                         "sku": variant_sku,
                         "error": result
                     }
+                if measurements:
+                    await asyncio.to_thread(self._sync_measurements, ls_variant_id, measurements, measurement_snapshot)
                 return {
                     "success": True,
                     "sku": variant_sku,
@@ -1391,6 +1559,12 @@ class LightspeedService:
                 f"'{product_name}' (ID: {product_id})"
             )
 
+            await asyncio.to_thread(self.update_family_metadata, str(product_id), product_name, product.get('category_id'), brand_id, product.get('description'))
+            if not variants:
+                price_result = await asyncio.to_thread(self._patch_2026_10, f"products/{product_id}", {'prices': {'price_excluding_tax': str(sale_price)}})
+                if isinstance(price_result, dict) and price_result.get('_lightspeed_validation_error'):
+                    raise ValueError(str(price_result))
+
             # Sync existing variants:
             # prices, supplier costs and inventory
             if variants:
@@ -1399,7 +1573,9 @@ class LightspeedService:
                     supplier_variants=variants,
                     retail_price=sale_price,
                     product_name=product_name,
-                    supplier_id=supplier_id
+                    supplier_id=supplier_id,
+                    enable_inventory_tracking=True,
+                    effective_markup_percentage=product.get("effective_markup_percentage")
                 )
 
             logger.info(
@@ -1416,16 +1592,36 @@ class LightspeedService:
                 exc_info=True
             )
 
-            return product_id
+            raise
 
     async def _create_product(self, product: dict, variants: list, cost_price: float, sale_price: float, supplier_id: str = None, brand_id: str = None) -> str:
         """Create a product, handling Lightspeed duplicate-product responses."""
         product_name = product.get("product_name", "")
-        description = product.get("description", "") or ""
+        description = description_html(product.get("description", "") or "")
         sku = product.get("supplier_sku", "")
         category_id = product.get("category_id")
         attr_names = set()
-        markup_percentage = await self._get_markup_percentage()
+        markup_percentage = float(product["effective_markup_percentage"]) if product.get("effective_markup_percentage") is not None else await self._get_markup_percentage()
+        if len(variants) == 1:
+            # Keep the supplier variant SKU even for a single eligible variant.
+            from single_family import append_payload
+            attributes = self._ensure_variant_attributes(['Color', 'Size'])
+            if not all(attributes.get(n) for n in ('Color', 'Size')):
+                raise ValueError('Cannot resolve Color/Size attributes; refusing to drop the source variant')
+            outlet = self._get_inventory_outlet_id()
+            if not outlet: raise ValueError('Configure a Lightspeed inventory outlet')
+            body = append_payload(variants[0], ['Color','Size'], markup_percentage, supplier_id, str(outlet))
+            if sku and sku.casefold() != str(variants[0]['variant_sku']).casefold():
+                body['codes'].append({'type':'CUSTOM','code':sku})
+            payload = {'name':product_name, 'description':description, 'classification':'VARIANT',
+                       'track_inventory':True, 'variant_attribute_ids':[attributes['Color'],attributes['Size']],
+                       'products':[body]}
+            if category_id: payload['category_id'] = str(category_id)
+            if brand_id: payload['brand_id'] = str(brand_id)
+            response = self.family_request('POST','product_families',payload)
+            ids = (response.get('data') or {}).get('product_ids') or []
+            if len(ids) != 1: raise ValueError('Creation returned no unique member ID; reconcile before retrying')
+            return str(ids[0])
         for v in variants:
             if v.get("color"):
                 attr_names.add("Color")
@@ -1435,20 +1631,8 @@ class LightspeedService:
             attr_map = self._ensure_variant_attributes(
                 list(attr_names)
             )
-            if not attr_map:
-                logger.warning(
-                    "No variant attributes, creating simple product"
-                )
-                return self._create_simple_product(
-                    product_name,
-                    description,
-                    sku,
-                    cost_price,
-                    sale_price,
-                    category_id,
-                    supplier_id,
-                    brand_id
-                )
+            if not all(attr_map.get(n) for n in attr_names):
+                raise ValueError('Missing variant attributes; refusing to create a simple product and lose variants')
             variant_list = []
             for v in variants:
                 definitions = []
@@ -1484,10 +1668,8 @@ class LightspeedService:
                     or 0
                 )
 
-                v_price = round(
-                    supplier_variant_price * (1 + markup_percentage / 100),
-                    2
-                )
+                from pricing_rules import variant_retail
+                v_price = variant_retail(v, markup_percentage)
 
                 try:
                     v_price = float(v_price)
@@ -1805,6 +1987,201 @@ class LightspeedService:
 
         return None
 
+    @staticmethod
+    def _product_collection(response):
+        if not isinstance(response, dict) or response.get('_lightspeed_validation_error'):
+            raise ValueError('Lightspeed SKU lookup returned an error')
+        data = response.get('data', response.get('products'))
+        if isinstance(data, list): return data
+        if isinstance(data, dict):
+            if data.get('id'): return [data]
+            for key in ('products', 'items', 'data'):
+                if isinstance(data.get(key), list): return data[key]
+        raise ValueError('Lightspeed SKU lookup has no recognised product collection; response keys: ' + ', '.join(response.keys()))
+
+    def lookup_skus(self, skus):
+        """Search twenty exact SKUs per request; page completely and fail closed."""
+        wanted = list(dict.fromkeys(str(s).strip().lower() for s in skus if str(s).strip()))
+        found = {}
+        family_deletions = {}  # scoped to this read, never reused for the second confirmation
+        for start in range(0, len(wanted), 20):
+            batch = wanted[start:start + 20]
+            offset = 0
+            while True:
+                params = [('type', 'products'), ('page_size', 1000), ('offset', offset)]
+                params += [('sku', sku) for sku in batch]
+                items = self._product_collection(self._get('search', params=params))
+                for item in items:
+                    if not isinstance(item, dict) or not item.get('id'):
+                        raise ValueError('Invalid SKU search record')
+                    if item.get('deleted_at') or item.get('deleted') is True or item.get('is_deleted') is True: continue
+                    family_id = item.get('family_id')
+                    if family_id:
+                        family_id = str(family_id)
+                        if family_id not in family_deletions:
+                            family_deletions[family_id] = self._family_deleted(family_id)
+                        if family_deletions[family_id]: continue
+                    codes = [item.get('sku')]
+                    for field in ('codes', 'product_codes'):
+                        codes += [c.get('code') for c in item.get(field) or [] if isinstance(c, dict) and str(c.get('type') or '').upper() == 'CUSTOM']
+                    for code in codes:
+                        key = str(code or '').strip().lower()
+                        if key in batch:
+                            if key in found and found[key]['id'] != item['id']:
+                                raise ValueError('Multiple remote products share SKU ' + key)
+                            found[key] = item
+                if len(items) < 1000:
+                    break
+                offset += len(items)
+                if offset > 100000:
+                    raise ValueError('SKU search pagination did not terminate')
+            logger.info('Checked %s/%s remote SKUs', min(start + 20, len(wanted)), len(wanted))
+        return found
+
+    def assert_split_skus_available(self, skus):
+        found = self.lookup_skus(skus)
+        if found:
+            raise ValueError('SKUs already exist in Lightspeed: ' + ', '.join(list(found)[:5]))
+
+    def family_request(self, method, resource, payload=None):
+        method = method.upper()
+        url = f'https://{self.domain_prefix}.retail.lightspeed.app/api/2026-10/{resource}'
+        attempts = 3 if method in ('GET', 'PATCH') else 1
+        for attempt in range(attempts):
+            try:
+                self._throttle()
+                logger.info('Lightspeed request: %s %s (attempt %s/%s)', method, resource, attempt + 1, attempts)
+                response = requests.request(method, url, headers=self._headers(), json=payload, timeout=120)
+                self._handle_rate_limit(response)
+                if response.status_code >= 500:
+                    raise requests.HTTPError(f'Lightspeed HTTP {response.status_code} during {method} {resource}', response=response)
+                result = self._handle_response(response)
+                if not isinstance(result, dict) or result.get('_lightspeed_validation_error'):
+                    raise ValueError('Lightspeed rejected request: ' + str(result)[:1000])
+                return result
+            except requests.RequestException as exc:
+                response = getattr(exc, 'response', None)
+                status = response.status_code if response is not None else None
+                if (status is None or status in (500, 502, 503, 504)) and attempt + 1 < attempts:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                raise requests.HTTPError(f'Lightspeed request failed: {method} {resource}; {exc}', response=response) from exc
+
+    @staticmethod
+    def variant_mismatch_message(family, remote, variants):
+        expected = {str(v['variant_sku']).strip().lower() for v in variants}
+        missing = sorted(expected - set(remote))
+        extra = sorted(set(remote) - expected)
+        return (f"Destination family {family.get('id')} differs from eligible source variants: "
+                f"source={len(expected)}, remote={len(remote)}, "
+                f"missing=[{', '.join(missing[:20])}], extra=[{', '.join(extra[:20])}]. "
+                "No product writes made; inspect the differences before adopting or adding variants.")
+
+    def _family_deleted(self, family_id):
+        """A tombstoned family can outlive legacy member/search records."""
+        try:
+            result = self.family_request('GET', f'product_families/{family_id}')
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404: return True
+            raise
+        family = result.get('data') if isinstance(result, dict) else None
+        if not isinstance(family, dict) or str(family.get('id') or '') != str(family_id) or 'deleted_at' not in family:
+            raise ValueError('Cannot verify destination family deletion; no recreation allowed')
+        return bool(family['deleted_at'])
+
+    def remote_product_deleted(self, product_id):
+        """Confirm deletion at both member and explicit family level; fail closed."""
+        try:
+            response = self._get(f'products/{product_id}')
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404: return True
+            raise
+        row = response.get('data') if isinstance(response, dict) else None
+        if not isinstance(row, dict) or str(row.get('id') or '') != str(product_id):
+            raise ValueError('Cannot establish whether the stored product was deleted')
+        if row.get('deleted_at'): return True
+        result = self.family_request('GET', f'products/{product_id}/family')
+        family = result.get('data') if isinstance(result, dict) else None
+        if not isinstance(family, dict) or not family.get('id'):
+            raise ValueError('Cannot verify member family; no recreation allowed')
+        if row.get('family_id') and str(row['family_id']) != str(family['id']):
+            raise ValueError('Member family changed during reconciliation; retry read later')
+        return self._family_deleted(str(family['id']))
+
+    def update_family_metadata(self, product_id, name, category_id=None, brand_id=None, description=None):
+        family = self.remote_family(product_id)
+        common = {'name': name, 'track_inventory': True}
+        if description: common['description'] = description_html(description)
+        if category_id: common['category_id'] = str(category_id)
+        if brand_id: common['brand_id'] = str(brand_id)
+        self.family_request('PATCH', f"product_families/{family['id']}", common)
+        confirmed = self.remote_family(product_id)
+        if confirmed.get('name') != name or confirmed.get('track_inventory') is not True:
+            raise ValueError('Family name/inventory tracking update was not confirmed')
+        if category_id and str(confirmed.get('category_id') or '') != str(category_id):
+            raise ValueError('Family category update was not confirmed')
+        if brand_id and str(confirmed.get('brand_id') or '') != str(brand_id):
+            raise ValueError('Family brand update was not confirmed')
+        if description and description_text(confirmed.get('description')) != description_text(description):
+            raise ValueError('Family description update was not confirmed; inspect destination metadata')
+        return confirmed
+
+    def remote_family(self, product_id):
+        result = self.family_request('GET', f'products/{product_id}/family')
+        family = result.get('data')
+        if not isinstance(family, dict) or not family.get('id'):
+            raise ValueError('Cannot verify destination family')
+        result = self.family_request('GET', f"product_families/{family['id']}")
+        full = result.get('data')
+        if not isinstance(full, dict) or not isinstance(full.get('products'), list):
+            raise ValueError('Full family response has no product collection')
+        if full.get('deleted_at'):
+            raise ValueError('Destination family is marked deleted; reconcile stored IDs before exporting')
+        for member in full['products']:
+            if not member.get('sku'):
+                custom = [c.get('code') for c in member.get('codes') or [] if isinstance(c, dict) and str(c.get('type')).upper() == 'CUSTOM']
+                if custom: member['sku'] = custom[0]
+        count = full.get('family_count')
+        if count is not None and int(count) != len(full['products']):
+            raise ValueError('Family response is incomplete; refusing to export')
+        if not hasattr(self, '_family_id_cache'): self._family_id_cache = {}
+        self._family_id_cache[str(product_id)] = str(full['id'])
+        return full
+
+    def remote_family_images(self, product_id):
+        family = self.remote_family(product_id)
+        if 'images' in family and family['images'] is None: return []
+        if isinstance(family.get('images'), list): return family['images']
+        # A product-to-family response may omit the image collection.
+        self._throttle()
+        response = requests.get(
+            f"https://{self.domain_prefix}.retail.lightspeed.app/api/2026-10/product_families/{family['id']}",
+            headers=self._headers(), timeout=120)
+        self._handle_rate_limit(response)
+        body = self._handle_response(response)
+        data = body.get('data') if isinstance(body, dict) else None
+        if not isinstance(data, dict) or not isinstance(data.get('images'), list):
+            raise ValueError('Full family response has no explicit image collection; check API access and response')
+        return data['images']
+
+    @staticmethod
+    def normalize_image_ack(result, owner_field, owner_id):
+        return normalize_image_ack(result, owner_field, owner_id)
+
+    def _upload_family_image(self, product_id, image_bytes, filename, content_type):
+        family_id = getattr(self, '_family_id_cache', {}).get(str(product_id))
+        if not family_id: family_id = str(self.remote_family(product_id)['id'])
+        self._throttle()
+        response = requests.post(
+            f"https://{self.domain_prefix}.retail.lightspeed.app/api/2026-10/product_families/{family_id}/images",
+            headers={k:v for k,v in self._headers().items() if k.lower() != 'content-type'}, files={'image': (filename, image_bytes, content_type)}, timeout=120)
+        self._handle_rate_limit(response)
+        result = self._handle_response(response)
+        normalized = normalize_image_ack(result, 'family_id', family_id)
+        if normalized.get('_image_acknowledged'):
+            logger.info('Family image upload acknowledged: ImageID=%s', normalized['data']['id'])
+        return normalized
+
     def _upload_images(self, product_id: str, images: list):
         """Upload product images concurrently with reliable error handling."""
 
@@ -1825,10 +2202,12 @@ class LightspeedService:
         def upload_single_image(index: int, img: dict):
             """Download and upload one image."""
 
+            write_attempted = False
             try:
                 if not isinstance(img, dict):
                     return {
                         "success": False,
+                        "write_attempted": write_attempted,
                         "index": index,
                         "filename": "",
                         "error": "Invalid image object"
@@ -1845,8 +2224,8 @@ class LightspeedService:
                 img_base64 = img.get("image_base64")
 
                 image_bytes = None
-                filename = f"product_{product_id}_img_{index}.jpg"
-                content_type = "image/jpeg"
+                filename = img.get("upload_filename") or f"product_{product_id}_img_{index}.jpg"
+                content_type = img.get("upload_content_type") or "image/jpeg"
 
                 # 1. LOCAL FILE
 
@@ -1933,6 +2312,7 @@ class LightspeedService:
 
                             return {
                                 "success": False,
+                        "write_attempted": write_attempted,
                                 "index": index,
                                 "filename": filename,
                                 "error": (
@@ -1945,6 +2325,7 @@ class LightspeedService:
 
                         return {
                             "success": False,
+                        "write_attempted": write_attempted,
                             "index": index,
                             "filename": filename,
                             "error": f"Image download failed: {e}"
@@ -1956,14 +2337,16 @@ class LightspeedService:
 
                     return {
                         "success": False,
+                        "write_attempted": write_attempted,
                         "index": index,
                         "filename": filename,
                         "error": "No usable image data"
                     }
 
                 # 5. UPLOAD TO LIGHTSPEED
-                result = self._upload(
-                    f"products/{product_id}/actions/image_upload",
+                write_attempted = True
+                result = self._upload_family_image(
+                    product_id,
                     image_bytes,
                     filename,
                     content_type
@@ -1976,15 +2359,21 @@ class LightspeedService:
 
                     return {
                         "success": False,
+                        "write_attempted": False,
                         "index": index,
                         "filename": filename,
                         "error": result
                     }
 
+                if isinstance(result, dict) and result.get('_image_ack_unverified'):
+                    return {'success': False, 'write_attempted': True, 'index': index,
+                            'filename': filename, 'error': 'Image acknowledgement needs remote readback'}
                 return {
                     "success": True,
+                    "write_attempted": True,
                     "index": index,
-                    "filename": filename
+                    "filename": filename,
+                    "image_id": (result.get('data') or {}).get('id') if isinstance(result, dict) else None
                 }
 
             except Exception as e:
@@ -1996,6 +2385,7 @@ class LightspeedService:
 
                 return {
                     "success": False,
+                        "write_attempted": write_attempted and getattr(getattr(e,"response",None),"status_code",None) not in (400,401,403,404,413,415,422,429),
                     "index": index,
                     "filename": "",
                     "error": str(e)
@@ -2005,8 +2395,15 @@ class LightspeedService:
         # RUN IMAGE UPLOADS CONCURRENTLY
         # ================================================================
 
+        if len(images) == 1:
+            outcome = upload_single_image(1, images[0])
+            ok = bool(outcome.get('success'))
+            logger.info('Image synchronization: Uploaded=%s, Failed=%s, Total=1', int(ok), int(not ok))
+            return {'uploaded':int(ok), 'failed':int(not ok), 'total':1, 'outcomes':[outcome]}
+
         uploaded = 0
         failed = 0
+        outcomes = []
 
         # Use the existing image executor.
         # It should be configured with max_workers=5.
@@ -2030,6 +2427,7 @@ class LightspeedService:
 
             try:
                 result = future.result()
+                outcomes.append(result)
 
                 index = result.get("index")
                 filename = result.get("filename", "")
@@ -2077,6 +2475,7 @@ class LightspeedService:
         )
 
         return {
+            "outcomes": outcomes,
             "uploaded": uploaded,
             "failed": failed,
             "total": total

@@ -1,23 +1,25 @@
-import { useState, useEffect, useCallback } from "react";
-import axios from "axios";
+import React, { useState, useEffect, useCallback } from "react";
+import axios from "../lib/axios";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Package, Truck, Check, ArrowUpRight, Layers, RefreshCw } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "") + "/api";
 const COLORS = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4", "#EC4899", "#F97316", "#84CC16", "#14B8A6"];
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error,setError]=useState('');
 
   const fetchStats = useCallback(async () => {
+    setError('');
     try {
       const res = await axios.get(`${API}/dashboard/stats`);
       setStats(res.data);
     } catch (e) {
-      console.error("Stats fetch error:", e);
+      setError('Could not load dashboard. Please retry.');
     } finally {
       setLoading(false);
     }
@@ -40,8 +42,8 @@ export default function Dashboard() {
 
   const statCards = [
     { label: "Total Products", value: stats?.total_products || 0, icon: Package, color: "text-blue-400" },
-    { label: "Selected for Odoo", value: stats?.selected_for_odoo || 0, icon: Check, color: "text-emerald-400" },
-    { label: "Synced to Odoo", value: stats?.synced_to_odoo || 0, icon: ArrowUpRight, color: "text-amber-400" },
+    { label: "Ready for Lightspeed", value: stats?.ready_for_lightspeed || 0, icon: Check, color: "text-emerald-400" },
+    { label: "Synced to Lightspeed", value: stats?.synced_to_lightspeed || 0, icon: ArrowUpRight, color: "text-amber-400" },
     { label: "Suppliers", value: stats?.total_suppliers || 0, icon: Truck, color: "text-sky-400" },
     { label: "Total Variants", value: stats?.total_variants || 0, icon: Layers, color: "text-violet-400" },
     { label: "Active Products", value: stats?.active_products || 0, icon: Package, color: "text-green-400" },
@@ -52,13 +54,20 @@ export default function Dashboard() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="font-heading text-3xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-zinc-500 text-sm mt-1 font-body">PromoStandards Middleware Overview</p>
+          <p className="text-zinc-500 text-sm mt-1 font-body">Supplier catalogue and Lightspeed export overview</p>
         </div>
         <Button onClick={fetchStats} variant="outline" className="rounded-none border-zinc-700 text-zinc-300 hover:bg-zinc-800" data-testid="refresh-stats-btn">
           <RefreshCw className="w-4 h-4" />
         </Button>
       </div>
 
+      {error && <div role="alert" className="border border-red-900 bg-red-950/30 p-3 text-red-300">{error}</div>}
+      <div className="flex flex-wrap gap-3 text-sm">
+        <a href="/preprocessing" className="border border-zinc-700 rounded px-3 py-2">Pre-processing</a>
+        <a href="/export-review" className="border border-zinc-700 rounded px-3 py-2">Needs review: {stats?.review_products ?? '—'}</a>
+        <span className="border border-amber-900 rounded px-3 py-2 text-amber-300">Images pending: {stats?.images_pending_lightspeed ?? '—'}</span>
+        <span className="border border-red-900 rounded px-3 py-2 text-red-300">Failed exports: {stats?.failed_lightspeed ?? '—'}</span>
+      </div>
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         {statCards.map((card, i) => (
