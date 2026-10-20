@@ -1,9 +1,9 @@
-version: '3.8'
+name: sphubsbox
 
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: supplierhub-postgres
+    container_name: sphubsbox-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-supplierhub}
@@ -13,7 +13,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5434:5432"
     networks:
       - supplierhub-network
     healthcheck:
@@ -26,14 +26,14 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: supplierhub-backend
+    container_name: sphubsbox-backend
     restart: unless-stopped
     env_file:
       - .env
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-supplierhub}:${POSTGRES_PASSWORD:-supplierhub_pass}@postgres:5432/${POSTGRES_DB:-supplierhub_db}
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8002:8001"
     depends_on:
       postgres:
         condition: service_healthy
@@ -46,10 +46,10 @@ services:
       dockerfile: Dockerfile
       args:
         - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL:-}
-    container_name: supplierhub-frontend
+    container_name: sphubsbox-frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "127.0.0.1:3001:80"
     depends_on:
       - backend
     networks:
