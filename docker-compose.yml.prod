@@ -1,0 +1,63 @@
+### Prod Docker Compose file ###
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: supplierhub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-supplierhub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-supplierhub_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-supplierhub_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    ports:
+      - "127.0.0.1:5433:5432"
+    networks:
+      - supplierhub-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-supplierhub}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: supplierhub-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-supplierhub}:${POSTGRES_PASSWORD:-supplierhub_pass}@postgres:5432/${POSTGRES_DB:-supplierhub_db}
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - supplierhub-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - REACT_APP_BACKEND_URL=${REACT_APP_BACKEND_URL:-}
+    container_name: supplierhub-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      - backend
+    networks:
+      - supplierhub-network
+
+volumes:
+  postgres_data:
+
+networks:
+  supplierhub-network:
+    driver: bridge
