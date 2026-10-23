@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import axios from "../lib/axios";
-import SanMarCategoryMapping from "./SanMarCategoryMapping";
 import CategoryPolicyManager from "./CategoryPolicyEditor";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
@@ -11,7 +10,59 @@ import { RefreshCw, FolderTree, ArrowRight, Check, X, Zap, ChevronRight } from "
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
+function SearchableCategoryPicker({value, options, disabled, open, onToggle, onChange, label}) {
+  const [query, setQuery] = useState("");
+  const [limit, setLimit] = useState(100);
+  const container = useRef(null);
+  const input = useRef(null);
+  const selected = options.find(option => option.value === value);
+  const matches = useMemo(() => options.filter(option => option.label.toLowerCase().includes(query.trim().toLowerCase())), [options,query]);
+  useEffect(() => {
+    if (!open) return;
+    setQuery(""); setLimit(100);
+    input.current?.focus();
+    const outside = event => { if (!container.current?.contains(event.target)) onToggle(false); };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [open,onToggle]);
+  return <div ref={container} className="relative min-w-[220px]" onKeyDown={event => {
+    if (event.key === "Escape") { event.stopPropagation(); onToggle(false); container.current?.querySelector("[aria-haspopup]")?.focus(); }
+  }}>
+    <button type="button" disabled={disabled} aria-label={label} aria-haspopup="listbox" aria-expanded={open}
+      onClick={() => onToggle(!open)} className="w-full flex items-center justify-between gap-2 text-left bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-zinc-100 text-sm disabled:opacity-50">
+      <span className="truncate">{selected?.label || (value !== "none" ? "Saved destination unavailable" : "— Not Mapped —")}</span><ChevronRight className="w-3 h-3 shrink-0" />
+    </button>
+    {open && <div className="absolute z-50 left-0 right-0 mt-1 bg-zinc-900 border border-zinc-700 rounded shadow-xl p-2">
+      <input ref={input} type="search" value={query} onChange={event => {setQuery(event.target.value);setLimit(100);}}
+        aria-label="Search destination categories" placeholder="Search categories or full path…"
+        onKeyDown={event => { if (event.key === "ArrowDown") {event.preventDefault();container.current?.querySelector('[role="option"]')?.focus();} }}
+        className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-2 text-sm text-zinc-100 mb-2" />
+      <div role="listbox" aria-label={label} className="max-h-64 overflow-y-auto" onKeyDown={event => {
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        const items = [...event.currentTarget.querySelectorAll('[role="option"]')];
+        const i = items.indexOf(document.activeElement);
+        event.preventDefault();items[Math.max(0,Math.min(items.length-1,i+(event.key === "ArrowDown" ? 1 : -1)))]?.focus();
+      }}>
+        <button type="button" role="option" aria-selected={value === "none"} onClick={() => {onChange("none");onToggle(false);}}
+          className="block w-full text-left text-sm px-2 py-2 text-zinc-400 hover:bg-zinc-800 focus:bg-zinc-800">— Not Mapped —</button>
+        {matches.slice(0,limit).map(option => <button key={option.value} type="button" role="option" aria-selected={value === option.value}
+          onClick={() => {onChange(option.value);onToggle(false);}}
+          className={`block w-full text-left text-sm px-2 py-2 whitespace-normal hover:bg-zinc-800 focus:bg-zinc-800 ${value === option.value ? "text-emerald-400" : "text-zinc-100"}`}>{option.label}</button>)}
+        {!matches.length && <p className="text-xs text-zinc-500 p-2">No matching categories</p>}
+      </div>
+      {matches.length > limit && <button type="button" onClick={() => setLimit(n=>n+100)} className="text-xs text-blue-400 p-2">Show more ({matches.length} matches)</button>}
+    </div>}
+  </div>;
+}
+
 function LegacyCategoryMapping() {
+  const [suppliers, setSuppliers] = useState([]);
+  const [supplierId, setSupplierId] = useState("");
+  const [supplierLoading, setSupplierLoading] = useState(false);
+  const [supplierError, setSupplierError] = useState("");
+  const [openPicker, setOpenPicker] = useState(null);
+  const supplierRef = useRef("");
+  const supplierRequest = useRef(0);
   const [platform, setPlatform] = useState("lightspeed");
   const [odooCategories, setOdooCategories] = useState([]);
   const [lightspeedCategories, setLightspeedCategories] = useState([]);
@@ -21,50 +72,140 @@ function LegacyCategoryMapping() {
   const [savingMapping, setSavingMapping] = useState({});
   const [selectedCategories, setSelectedCategories] = useState(new Set());
 
+  const [categorySearch, setCategorySearch] = useState("");
+  const [mappingPage, setMappingPage] = useState(1);
+  const [platformPage, setPlatformPage] = useState(1);
+  const [categoryStatus, setCategoryStatus] = useState({});
+  const alive = useRef(false);
+  const categoryFingerprint = useRef(null);
+  const PAGE_SIZE = 25;
+  const acceptCategories = useCallback((data) => {
+    if (!alive.current) return;
+    const rows = Array.isArray(data.categories) ? data.categories : [];
+    const fingerprint = JSON.stringify(rows);
+    if (categoryFingerprint.current !== fingerprint) {
+      categoryFingerprint.current = fingerprint;
+      setLightspeedCategories(rows);
+    }
+    setCategoryStatus(prev => prev.synced_at === data.synced_at && prev.last_error === data.last_error
+      ? prev : {synced_at: data.synced_at, last_error: data.last_error});
+  }, []);
+  const filteredCategories = useMemo(() => supplierCategories.filter(category =>
+    String(category).toLowerCase().includes(categorySearch.trim().toLowerCase())
+  ), [supplierCategories, categorySearch]);
+  const mappingPages = Math.max(1, Math.ceil(filteredCategories.length / PAGE_SIZE));
+  const safePage = Math.min(mappingPage, mappingPages);
+  const visibleSupplierCategories = filteredCategories.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  useEffect(() => { setMappingPage(1); }, [categorySearch, platform, supplierId]);
+  useEffect(() => { setPlatformPage(1); }, [platform]);
+
   const fetchData = useCallback(async () => {
     try {
-      const [odooRes, supplierRes, mappingsRes] = await Promise.all([
-        axios.get(`${API}/odoo/categories`).catch(() => ({ data: { categories: [] } })),
-        axios.get(`${API}/supplier-categories`),
-        axios.get(`${API}/category-mappings`)
+      const [odooRes, suppliersRes, lightspeedRes] = await Promise.all([
+        axios.get(`${API}/odoo/categories`).catch(() => ({data:{categories:[]}})),
+        axios.get(`${API}/suppliers`),
+        axios.get(`${API}/categories/lightspeed`)
       ]);
-
+      if (!alive.current) return;
       setOdooCategories(odooRes.data.categories || []);
-      setSupplierCategories(supplierRes.data.categories || []);
-      setMappings(mappingsRes.data.mappings || []);
-
-      const selected = new Set(
-        (odooRes.data.categories || [])
-          .filter(c => c.is_selected)
-          .map(c => c.id)
-      );
-      setSelectedCategories(selected);
-    } catch (e) {
-      console.error("Failed to fetch data:", e);
+      setSelectedCategories(new Set((odooRes.data.categories || []).filter(c=>c.is_selected).map(c=>c.id)));
+      const list = Array.isArray(suppliersRes.data) ? suppliersRes.data : suppliersRes.data.suppliers || [];
+      setSuppliers(list);
+      setSupplierId(current => list.some(s=>s.id === current) ? current : list[0]?.id || "");
+      acceptCategories(lightspeedRes.data);
+    } catch (error) {
+      if (alive.current) toast.error("Unable to load categories or suppliers. Check your connection.");
     }
-  }, []);
+  }, [acceptCategories]);
 
   useEffect(() => {
+    supplierRef.current = supplierId;
+    const request = ++supplierRequest.current;
+    setSupplierCategories([]);setMappings([]);setOpenPicker(null);setSupplierError("");
+    if (!supplierId) {setSupplierLoading(false);return;}
+    setSupplierLoading(true);
+    const controller = new AbortController();
+    Promise.all([
+      axios.get(`${API}/supplier-categories`, {params:{supplier_id:supplierId},signal:controller.signal}),
+      axios.get(`${API}/category-mappings`, {params:{supplier_id:supplierId},signal:controller.signal})
+    ]).then(([categoriesRes,mappingsRes]) => {
+      if (controller.signal.aborted || request !== supplierRequest.current) return;
+      setSupplierCategories(categoriesRes.data.categories || []);
+      setMappings(mappingsRes.data.mappings || []);
+    }).catch(error => {
+      if (!controller.signal.aborted && request === supplierRequest.current) setSupplierError("Could not load this supplier's categories. Refresh the page to retry.");
+    }).finally(() => {
+      if (!controller.signal.aborted && request === supplierRequest.current) setSupplierLoading(false);
+    });
+    return () => controller.abort();
+  }, [supplierId]);
+
+  useEffect(() => {
+    alive.current = true;
     fetchData();
-  }, [fetchData]);
+    let timer;
+    const poll = async () => {
+      try {
+        if (!document.hidden) {
+          const res = await axios.get(`${API}/categories/lightspeed`, {timeout: 15000});
+          acceptCategories(res.data);
+        }
+      } catch (error) {
+        if (alive.current) console.error("Cannot load saved categories:", error);
+      } finally {
+        if (alive.current) timer = setTimeout(poll, 15000);
+      }
+    };
+    timer = setTimeout(poll, 15000);
+    return () => { alive.current = false; clearTimeout(timer); };
+  }, [fetchData, acceptCategories]);
 
   // Build hierarchical Lightspeed categories (Level 1 -> Level 2)
   const lsHierarchy = useMemo(() => {
-    if (!lightspeedCategories.length) return [];
+    const byId = new Map();
+    lightspeedCategories.forEach(category => {
+      if (category.lightspeed_category_id) byId.set(String(category.lightspeed_category_id), category);
+    });
+    const children = new Map();
+    byId.forEach(category => {
+      const parent = category.parent_id ? String(category.parent_id) : null;
+      const key = byId.has(parent) ? parent : null;
+      if (!children.has(key)) children.set(key, []);
+      children.get(key).push(category);
+    });
+    children.forEach(rows => rows.sort((a,b) => String(a.category_name || "").localeCompare(String(b.category_name || ""))));
     const result = [];
-    const visit = (parentId, level = 1) => {
-      lightspeedCategories.filter(c => (c.parent_id || null) === parentId)
-        .sort((a,b) => a.category_name.localeCompare(b.category_name))
-        .forEach(c => { result.push({...c, level}); if(level < 3) visit(c.lightspeed_category_id, level + 1); });
+    const seen = new Set();
+    const roots = children.get(null) || [];
+    const stack = roots.slice().reverse().map(category => ({category, level: 1}));
+    const drain = () => {
+      while (stack.length) {
+        const {category, level} = stack.pop();
+        const id = String(category.lightspeed_category_id);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        result.push({...category, level});
+        (children.get(id) || []).slice().reverse().forEach(child => stack.push({category: child, level: level + 1}));
+      }
     };
-    visit(null);
+    drain();
+    byId.forEach(category => {
+      if (!seen.has(String(category.lightspeed_category_id))) {
+        stack.push({category, level: 1}); drain();
+      }
+    });
     return result;
   }, [lightspeedCategories]);
 
-  // Flat list of leaf categories for mapping dropdown
   const lsLeafCategories = useMemo(() => {
-    return lightspeedCategories.filter(c => c.leaf_category);
+    const parents = new Set(lightspeedCategories.map(c => c.parent_id).filter(Boolean).map(String));
+    return lightspeedCategories.filter(c => !parents.has(String(c.lightspeed_category_id)));
   }, [lightspeedCategories]);
+  const platformRows = platform === "odoo" ? odooCategories : lsHierarchy;
+  const platformPages = Math.max(1, Math.ceil(platformRows.length / 50));
+  const safePlatformPage = Math.min(platformPage, platformPages);
+  const visiblePlatformRows = platformRows.slice((safePlatformPage - 1) * 50, safePlatformPage * 50);
+  const mappingByName = useMemo(() => new Map(mappings.map(m => [m.supplier_category_name, m])), [mappings]);
 
   const syncCategories = async () => {
     setSyncing(true);
@@ -77,13 +218,25 @@ function LegacyCategoryMapping() {
         } else {
           toast.error(res.data.error || "Failed to sync categories");
         }
-      } else {
-        const res = await axios.get(`${API}/categories/lightspeed`);
-        if (res.data.success) {
-          setLightspeedCategories(res.data.categories || []);
-          toast.success(`Fetched ${(res.data.categories || []).length} categories from Lightspeed`);
         } else {
-          toast.error(res.data.error || "Failed to fetch Lightspeed categories");
+        const res = await axios.post(
+          `${API}/categories/lightspeed/refresh`
+        );
+
+        if (res.data.success) {
+          acceptCategories(res.data);
+
+          if (res.data.last_error) {
+            toast.error(res.data.last_error);
+          } else {
+            toast.success(
+              `Updated ${(res.data.categories || []).length} categories`
+            );
+          }
+        } else {
+          toast.error(
+            res.data.error || "Failed to refresh Lightspeed categories"
+          );
         }
       }
     } catch (e) {
@@ -134,7 +287,9 @@ function LegacyCategoryMapping() {
   const updateMapping = async (supplierCategory, value) => {
     setSavingMapping(prev => ({ ...prev, [supplierCategory]: true }));
     try {
-      const body = { supplier_category_name: supplierCategory };
+      const savingSupplier = supplierId;
+      if (!savingSupplier || supplierLoading) return;
+      const body = {supplier_id: savingSupplier, supplier_category_name: supplierCategory};
       if (platform === "odoo") {
         body.odoo_category_id = value === "none" ? null : parseInt(value);
       } else {
@@ -143,7 +298,13 @@ function LegacyCategoryMapping() {
       }
       await axios.post(`${API}/category-mappings`, body);
       toast.success(`Mapped "${supplierCategory}"`);
-      fetchData();
+      if (supplierRef.current !== savingSupplier) return;
+      setMappings(prev => {
+        const existing = prev.find(item => item.supplier_category_name === supplierCategory);
+        return existing
+          ? prev.map(item => item.supplier_category_name === supplierCategory ? {...item, ...body} : item)
+          : [...prev, body];
+      });
     } catch (e) {
       toast.error("Failed to save mapping");
     } finally {
@@ -152,7 +313,7 @@ function LegacyCategoryMapping() {
   };
 
   const getMappingForSupplier = (supplierCategory) => {
-    const mapping = mappings.find(m => m.supplier_category_name === supplierCategory);
+    const mapping = mappingByName.get(supplierCategory);
     if (platform === "odoo") {
       return mapping?.odoo_category_id?.toString() || "none";
     } else {
@@ -166,6 +327,12 @@ function LegacyCategoryMapping() {
   const targetCategories = platform === "odoo"
     ? odooCategories.filter(c => selectedCategories.has(c.id))
     : lsLeafCategories;
+
+  const targetOptions = useMemo(() => targetCategories.map(c => ({
+    value: String(platform === "odoo" ? c.odoo_category_id : c.lightspeed_category_id),
+    label: platform === "odoo" ? `${c.category_name}${c.parent_category ? ` (${c.parent_category})` : ""}`
+      : Array.isArray(c.category_path) && c.category_path.length ? c.category_path.map(p=>p.name).join(" > ") : c.category_name
+  })).sort((a,b)=>String(a.label).localeCompare(String(b.label))), [targetCategories,platform]);
 
   const mappedCount = mappings.filter(m =>
     platform === "odoo" ? m.odoo_category_id : m.lightspeed_category_id
@@ -214,16 +381,19 @@ function LegacyCategoryMapping() {
               data-testid="sync-categories-btn"
             >
               {syncing ? <RefreshCw className="w-4 h-4 animate-spin mr-2" /> : <RefreshCw className="w-4 h-4 mr-2" />}
-              Sync Categories from {platformLabel}
+              {platform === "lightspeed" ? "Refresh now" : `Sync Categories from ${platformLabel}`}
             </Button>
           </div>
-          <p className="text-sm text-zinc-500 mt-2">
-            {platform === "odoo"
-              ? "Fetch categories from Odoo and select which ones to use for product mapping."
-              : "Fetch categories from Lightspeed Retail store to use for product mapping."}
-          </p>
+          {platform === "odoo" && <p className="text-sm text-zinc-500 mt-2">
+            Fetch categories from Odoo and select which ones to use for product mapping.
+          </p>}
         </CardHeader>
         <CardContent>
+          {platform === "lightspeed" && <div className="text-xs text-zinc-500 mb-3" role="status">
+            {categoryStatus.synced_at ? `Last updated: ${new Date(categoryStatus.synced_at).toLocaleString()}` : "Waiting for saved categories…"}
+            {categoryStatus.last_error && <p className="text-amber-400 mt-1">{categoryStatus.last_error}</p>}
+          </div>}
+
           {platform === "odoo" ? (
             odooCategories.length > 0 ? (
               <>
@@ -248,7 +418,7 @@ function LegacyCategoryMapping() {
                       </tr>
                     </thead>
                     <tbody>
-                      {odooCategories.map((cat) => (
+                      {visiblePlatformRows.map((cat) => (
                         <tr key={cat.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30" data-testid={`odoo-category-row-${cat.odoo_category_id}`}>
                           <td className="py-2 px-3">
                             <Checkbox
@@ -284,7 +454,7 @@ function LegacyCategoryMapping() {
                     </tr>
                   </thead>
                   <tbody>
-                    {lsHierarchy.map((cat) => (
+                    {visiblePlatformRows.map((cat) => (
                       <tr
                         key={cat.lightspeed_category_id}
                         className={`border-b border-zinc-800/50 hover:bg-zinc-800/30 ${cat.level === 1 ? 'bg-zinc-800/20' : ''}`}
@@ -317,10 +487,15 @@ function LegacyCategoryMapping() {
               <div className="text-center py-10 text-zinc-500">
                 <Zap className="w-12 h-12 mx-auto mb-4 opacity-50" />
                 <p>No Lightspeed categories loaded yet.</p>
-                <p className="text-sm mt-1">Click "Sync Categories from Lightspeed" to fetch them. Ensure credentials are set in Settings.</p>
+                <p className="text-sm mt-1">Connect Lightspeed in Settings, then wait for the automatic refresh or click Refresh now.</p>
               </div>
             )
           )}
+          {platformRows.length > 50 && <div className="flex flex-wrap items-center justify-end gap-3 mt-4 pt-4 border-t border-zinc-800">
+            <Button variant="outline" size="sm" disabled={safePlatformPage <= 1} onClick={() => setPlatformPage(safePlatformPage - 1)}>Previous</Button>
+            <span className="text-xs text-zinc-400">{safePlatformPage} / {platformPages} · {platformRows.length} categories</span>
+            <Button variant="outline" size="sm" disabled={safePlatformPage >= platformPages} onClick={() => setPlatformPage(safePlatformPage + 1)}>Next</Button>
+          </div>}
         </CardContent>
       </Card>
 
@@ -336,8 +511,21 @@ function LegacyCategoryMapping() {
           </p>
         </CardHeader>
         <CardContent>
-          {supplierCategories.length > 0 ? (
-            <div className="overflow-x-auto">
+          <div className="flex flex-wrap items-center gap-3 mb-4">
+            <select value={supplierId} aria-label="Supplier" onChange={event => {
+              supplierRef.current=event.target.value;setSupplierLoading(true);setSupplierId(event.target.value);
+            }} className="w-full sm:w-64 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100">
+              {!suppliers.length && <option value="">No suppliers available</option>}
+              {suppliers.map(supplier => <option key={supplier.id} value={supplier.id}>{supplier.supplier_name}</option>)}
+            </select>
+            <input type="search" value={categorySearch} onChange={event => setCategorySearch(event.target.value)}
+              placeholder="Search supplier categories…" aria-label="Search supplier categories"
+              className="w-full sm:w-80 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100" />
+
+          </div>
+          {supplierLoading ? <p role="status" className="py-8 text-zinc-400">Loading supplier categories…</p> : supplierError ?
+            <p role="alert" className="py-8 text-red-400">{supplierError}</p> : filteredCategories.length > 0 ? (
+            <div className="overflow-visible">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-zinc-800 text-zinc-400">
@@ -347,40 +535,17 @@ function LegacyCategoryMapping() {
                   </tr>
                 </thead>
                 <tbody>
-                  {supplierCategories.map((supplierCat) => {
+                  {visibleSupplierCategories.map((supplierCat) => {
                     const currentMapping = getMappingForSupplier(supplierCat);
                     const isMapped = currentMapping !== "none";
                     return (
                       <tr key={supplierCat} className="border-b border-zinc-800/50 hover:bg-zinc-800/30" data-testid={`mapping-row-${supplierCat}`}>
                         <td className="py-2 px-3 text-zinc-100 font-medium">{supplierCat}</td>
                         <td className="py-2 px-3">
-                          <Select
-                            value={currentMapping}
-                            onValueChange={(value) => updateMapping(supplierCat, value)}
-                            disabled={savingMapping[supplierCat]}
-                          >
-                            <SelectTrigger className="w-full bg-zinc-800 border-zinc-700" data-testid={`mapping-select-${supplierCat}`}>
-                              <SelectValue placeholder={`Select ${platformLabel} category`} />
-                            </SelectTrigger>
-                            <SelectContent className="bg-zinc-900 border-zinc-800 max-h-72">
-                              <SelectItem value="none">— Not Mapped —</SelectItem>
-                              {platform === "odoo" ? (
-                                targetCategories.map((c) => (
-                                  <SelectItem key={c.odoo_category_id} value={c.odoo_category_id.toString()}>
-                                    {c.category_name}{c.parent_category && ` (${c.parent_category})`}
-                                  </SelectItem>
-                                ))
-                              ) : (
-                                targetCategories.map((c) => (
-                                  <SelectItem key={c.lightspeed_category_id} value={c.lightspeed_category_id}>
-                                    {(c.category_path && c.category_path.length > 1)
-                                      ? c.category_path.map(p => p.name).join(" > ")
-                                      : c.category_name}
-                                  </SelectItem>
-                                ))
-                              )}
-                            </SelectContent>
-                          </Select>
+                          <SearchableCategoryPicker
+                            value={currentMapping} options={targetOptions} disabled={savingMapping[supplierCat] || supplierLoading}
+                            open={openPicker === supplierCat} onToggle={show => setOpenPicker(show ? supplierCat : null)}
+                            onChange={value => updateMapping(supplierCat,value)} label={`${platformLabel} category for ${supplierCat}`} />
                         </td>
                         <td className="py-2 px-3">
                           {savingMapping[supplierCat] ? (
@@ -400,10 +565,15 @@ function LegacyCategoryMapping() {
           ) : (
             <div className="text-center py-10 text-zinc-500">
               <ArrowRight className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p>No supplier categories found.</p>
+              <p>No matching supplier categories found.</p>
               <p className="text-sm mt-1">Sync products from suppliers first to see their categories.</p>
             </div>
           )}
+          <div className="flex flex-wrap items-center justify-end gap-3 mt-4 pt-4 border-t border-zinc-800">
+              <Button variant="outline" size="sm" disabled={safePage <= 1} onClick={() => setMappingPage(safePage - 1)}>Previous</Button>
+              <span className="text-xs text-zinc-400">{safePage} / {mappingPages} · {filteredCategories.length} categories</span>
+              <Button variant="outline" size="sm" disabled={safePage >= mappingPages} onClick={() => setMappingPage(safePage + 1)}>Next</Button>
+            </div>
         </CardContent>
       </Card>
 
@@ -442,10 +612,9 @@ function LegacyCategoryMapping() {
 }
 
 export default function CategoryMapping() {
-  const [mode, setMode] = useState('sanmar');
+  const [mode, setMode] = useState('mapping');
   return <><div className="px-6 pt-5 flex flex-wrap gap-2" aria-label="Mapping mode">
-    <Button variant={mode==='sanmar'?'default':'outline'} onClick={() => setMode('sanmar')}>SanMar catalogue mapping</Button>
-    <Button variant={mode==='legacy'?'default':'outline'} onClick={() => setMode('legacy')}>Legacy / other supplier mapping</Button>
+    <Button variant={mode==='mapping'?'default':'outline'} onClick={() => setMode('mapping')}>Category mapping</Button>
     <Button variant={mode==='defaults'?'default':'outline'} onClick={() => setMode('defaults')}>Category pricing &amp; measurements</Button>
-  </div>{mode==='sanmar'?<SanMarCategoryMapping />:mode==='defaults'?<CategoryPolicyManager />:<LegacyCategoryMapping />}</>;
+  </div>{mode==='defaults'?<CategoryPolicyManager />:<LegacyCategoryMapping />}</>;
 }

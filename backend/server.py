@@ -348,11 +348,16 @@ async def startup():
     init_scheduler(deps.pool)
     await apply_schedule_from_settings()
 
+    await start_category_refresh()
+
 
 @app.on_event("shutdown")
 async def shutdown():
     from scheduler import shutdown_scheduler
+
     shutdown_scheduler()
+    await stop_category_refresh()
+
     if deps.pool:
         await deps.pool.close()
 
@@ -385,7 +390,11 @@ from routes.dashboard import router as dashboard_router
 from routes.settings import router as settings_router
 from routes.sync import router as sync_router, init_sync_schema
 from routes.odoo import router as odoo_router
-from routes.lightspeed import router as lightspeed_router
+from routes.lightspeed import (
+    router as lightspeed_router,
+    start_category_refresh,
+    stop_category_refresh,
+)
 from routes.categories import router as categories_router
 from routes.taxonomy import router as taxonomy_router
 from taxonomy_extensions import router as taxonomy_extensions_router

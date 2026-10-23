@@ -7,6 +7,10 @@ from deps import row_to_dict, utc_now, get_current_user, calculate_sale_price, c
 import logging
 import secrets
 import os
+import json
+import logging
+from contextlib import suppress
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -160,12 +164,173 @@ async def test_lightspeed_connection(user: dict = Depends(get_current_user)):
             """, ls.access_token, ls.token_expires_at, utc_now())
     return result
 
+_category_refresh_task = None
+_category_refresh_lock = asyncio.Lock()
+_category_logger = logging.getLogger(__name__)
+
+CATEGORY_REFRESH_SECONDS = 300
+
+
+async def _category_store_key(conn):
+    value = await conn.fetchval("""
+        SELECT lightspeed_store_id
+        FROM settings
+        WHERE id = 'system_settings'
+    """)
+    return str(value or "").strip().lower()
+
+
+async def _refresh_category_snapshot():
+    # Prevent concurrent refreshes within this backend process.
+    if _category_refresh_lock.locked():
+        return
+
+    async with _category_refresh_lock:
+        async with deps.pool.acquire() as conn:
+            store = await _category_store_key(conn)
+
+        if not store:
+            return
+
+        try:
+            ls = await _get_ls_service()
+            result = await asyncio.to_thread(ls.get_categories)
+
+            if not isinstance(result, dict) or not result.get("success"):
+                raise ValueError("Lightspeed category request failed")
+
+            categories = result.get("categories")
+            if not isinstance(categories, list):
+                raise ValueError("Invalid Lightspeed category response")
+
+            seen = set()
+
+            for category in categories:
+                if not isinstance(category, dict):
+                    raise ValueError("Invalid category record")
+
+                category_id = category.get("lightspeed_category_id")
+
+                if not category_id or not category.get("category_name"):
+                    raise ValueError("Category ID or name is missing")
+
+                if category_id in seen:
+                    raise ValueError("Duplicate category ID")
+
+                seen.add(category_id)
+
+            async with deps.pool.acquire() as conn:
+                # Do not save results under a different store.
+                if await _category_store_key(conn) != store:
+                    return
+
+                await conn.execute("""
+                    INSERT INTO lightspeed_category_snapshots
+                        (store_domain, categories, synced_at, last_error)
+                    VALUES ($1, $2::jsonb, NOW(), NULL)
+                    ON CONFLICT (store_domain)
+                    DO UPDATE SET
+                        categories = EXCLUDED.categories,
+                        synced_at = EXCLUDED.synced_at,
+                        last_error = NULL
+                """, store, json.dumps(categories))
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception:
+            _category_logger.exception("Category refresh failed")
+
+            async with deps.pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO lightspeed_category_snapshots
+                        (store_domain, last_error)
+                    VALUES ($1, $2)
+                    ON CONFLICT (store_domain)
+                    DO UPDATE SET last_error = EXCLUDED.last_error
+                """, store, "Refresh failed; previously saved categories retained.")
+
+
+async def _category_refresh_loop():
+    while True:
+        try:
+            await _refresh_category_snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _category_logger.exception("Category refresh worker failed")
+
+        await asyncio.sleep(CATEGORY_REFRESH_SECONDS)
+
+
+async def start_category_refresh():
+    global _category_refresh_task
+
+    async with deps.pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS lightspeed_category_snapshots (
+                store_domain TEXT PRIMARY KEY,
+                categories JSONB NOT NULL DEFAULT '[]'::jsonb,
+                synced_at TIMESTAMPTZ,
+                last_error TEXT
+            )
+        """)
+
+    if _category_refresh_task is None or _category_refresh_task.done():
+        _category_refresh_task = asyncio.create_task(
+            _category_refresh_loop()
+        )
+
+
+async def stop_category_refresh():
+    global _category_refresh_task
+
+    if _category_refresh_task:
+        _category_refresh_task.cancel()
+
+        with suppress(asyncio.CancelledError):
+            await _category_refresh_task
+
+        _category_refresh_task = None
+
+
 @router.get("/categories/lightspeed")
 async def get_lightspeed_categories(
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user)
 ):
-    ls = await _get_ls_service()
-    return await asyncio.to_thread(ls.get_categories)
+    # This endpoint reads PostgreSQL; it does not call Lightspeed.
+    async with deps.pool.acquire() as conn:
+        store = await _category_store_key(conn)
+
+        row = await conn.fetchrow("""
+            SELECT categories, synced_at, last_error
+            FROM lightspeed_category_snapshots
+            WHERE store_domain = $1
+        """, store)
+
+    categories = row["categories"] if row else []
+
+    if isinstance(categories, str):
+        categories = json.loads(categories)
+
+    return {
+        "success": True,
+        "categories": categories,
+        "synced_at": row["synced_at"] if row else None,
+        "last_error": row["last_error"] if row else None,
+    }
+
+
+@router.post("/categories/lightspeed/refresh")
+async def refresh_lightspeed_categories(
+    user: dict = Depends(get_current_user)
+):
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    await _refresh_category_snapshot()
+
+    return await get_lightspeed_categories(user)
 
 @router.post("/sync/lightspeed/{supplier_id}")
 async def push_to_lightspeed(supplier_id: str, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):

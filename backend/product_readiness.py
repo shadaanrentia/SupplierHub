@@ -84,6 +84,10 @@ async def load_readiness(conn, products):
     mappings = defaultdict(set)
     for r in await conn.fetch('SELECT supplier_category_name,lightspeed_category_id FROM category_mapping WHERE lightspeed_category_id IS NOT NULL AND lightspeed_category_id<>\'\''):
         mappings[r['supplier_category_name']].add(str(r['lightspeed_category_id']))
+    explicit_mappings = {}
+    if await conn.fetchval("SELECT to_regclass('public.supplier_category_links')"):
+        explicit_mappings = {(r['supplier_id'],r['supplier_category_name']):r['lightspeed_category_id']
+            for r in await conn.fetch("SELECT supplier_id,supplier_category_name,lightspeed_category_id FROM supplier_category_links WHERE supplier_id=ANY($1::varchar[]) AND store_domain=$2 AND lightspeed_override=TRUE", supplier_ids,domain)}
     remote_ids = list({str(i) for p in products for i in [p.get('lightspeed_product_id')] if i} | {str(g['lightspeed_product_id']) for rows in groups.values() for g in rows if g.get('lightspeed_product_id')})
     image_issues = defaultdict(int)
     if remote_ids:
@@ -92,7 +96,12 @@ async def load_readiness(conn, products):
     for product in products:
         pid, supplier = product['id'], product.get('supplier_id')
         category_id, error, label = None, None, None
-        if supplier in managed:
+        explicit_key = (supplier, product.get('category'))
+        if explicit_key in explicit_mappings:
+            category_id = explicit_mappings[explicit_key]
+            label = product.get('category')
+            if not category_id: error = 'Choose a Lightspeed category for this supplier category'
+        elif supplier in managed:
             key = (supplier, sku_key(product.get('supplier_sku')))
             style = styles.get(key)
             path = overrides[key] if key in overrides else (style or {}).get('primary_path')
