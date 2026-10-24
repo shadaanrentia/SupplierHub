@@ -10,14 +10,22 @@ from models import ProductSelectRequest, BulkSelectRequest, BulkDeleteRequest
 router = APIRouter(prefix="/api")
 logger = logging.getLogger(__name__)
 @router.get("/products/categories")
-async def get_categories(user: dict = Depends(get_current_user)):
+async def get_categories(supplier_id: Optional[str] = None, user: dict = Depends(get_current_user)):
     async with deps.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category != '' ORDER BY category")
+        rows = await conn.fetch("""SELECT DISTINCT category FROM products
+            WHERE category IS NOT NULL AND BTRIM(category) != ''
+            AND ($1::text IS NULL OR supplier_id = $1)
+            ORDER BY category""", supplier_id if supplier_id and supplier_id != 'all' else None)
         return {"categories": [r["category"] for r in rows]}
 @router.get("/products/brands")
-async def get_brands(user: dict = Depends(get_current_user)):
+async def get_brands(supplier_id: Optional[str] = None, category: Optional[str] = None, user: dict = Depends(get_current_user)):
     async with deps.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT DISTINCT brand FROM products WHERE brand IS NOT NULL AND brand != '' ORDER BY brand")
+        rows = await conn.fetch("""SELECT DISTINCT brand FROM products
+            WHERE brand IS NOT NULL AND BTRIM(brand) != ''
+            AND ($1::text IS NULL OR supplier_id = $1)
+            AND ($2::text IS NULL OR category = $2)
+            ORDER BY brand""", supplier_id if supplier_id and supplier_id != 'all' else None,
+            category if category and category != 'all' else None)
         return {"brands": [r["brand"] for r in rows]}
 @router.get("/products")
 async def get_products(

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { Card, CardContent } from "@/components/ui/card";
@@ -133,24 +133,58 @@ export default function Products() {
   const [selectedProducts, setSelectedProducts] = useState(new Set());
   const [deleting, setDeleting] = useState(false);
 
-  const fetchFilters = useCallback(async () => {
-    try {
-      const [suppliersResponse, categoriesResponse, brandsResponse] =
-        await Promise.all([
-          axios.get(`${API}/suppliers`),
-          axios.get(`${API}/products/categories`),
-          axios.get(`${API}/products/brands`),
-        ]);
+  const [categoriesLoading, setCategoriesLoading] = useState(true);
+  const [brandsLoading, setBrandsLoading] = useState(true);
+  const [filterError, setFilterError] = useState('');
+  const productRequest = useRef(0);
 
-      setSuppliers(suppliersResponse.data.suppliers || []);
-      setCategories(categoriesResponse.data.categories || []);
-      setBrands(brandsResponse.data.brands || []);
-    } catch (error) {
-      console.error("Filter fetch error:", error);
-    }
+  useEffect(() => {
+    let live = true;
+    const controller = new AbortController();
+    axios.get(`${API}/suppliers`, { signal: controller.signal })
+      .then(response => { if (live) setSuppliers(response.data.suppliers || []); })
+      .catch(error => { if (live && !axios.isCancel(error)) toast.error('Failed to load suppliers'); });
+    return () => { live = false; controller.abort(); };
   }, []);
 
+  useEffect(() => {
+    let live = true;
+    const controller = new AbortController();
+    setCategories([]);
+    setCategoriesLoading(true);
+    setFilterError('');
+    axios.get(`${API}/products/categories`, {
+      signal: controller.signal,
+      params: supplier === 'all' ? {} : { supplier_id: supplier },
+    }).then(response => {
+      if (live) setCategories(response.data.categories || []);
+    }).catch(error => {
+      if (live && !axios.isCancel(error)) setFilterError('Unable to load categories. Refresh the page to retry.');
+    }).finally(() => { if (live) setCategoriesLoading(false); });
+    return () => { live = false; controller.abort(); };
+  }, [supplier]);
+
+  useEffect(() => {
+    let live = true;
+    const controller = new AbortController();
+    setBrands([]);
+    setBrandsLoading(true);
+    axios.get(`${API}/products/brands`, {
+      signal: controller.signal,
+      params: {
+        ...(supplier !== 'all' && { supplier_id: supplier }),
+        ...(category !== 'all' && { category }),
+      },
+    }).then(response => {
+      if (live) setBrands(response.data.brands || []);
+    }).catch(error => {
+      if (live && !axios.isCancel(error)) toast.error('Unable to load brands');
+    }).finally(() => { if (live) setBrandsLoading(false); });
+    return () => { live = false; controller.abort(); };
+  }, [supplier, category]);
+
   const fetchProducts = useCallback(async () => {
+    const request = ++productRequest.current;
     setLoading(true);
 
     try {
@@ -195,16 +229,18 @@ export default function Products() {
         params,
       });
 
+      if (request !== productRequest.current) return;
       setProducts(response.data.products || []);
       setTotal(response.data.total || 0);
       setPages(response.data.pages || 1);
     } catch (error) {
+      if (request !== productRequest.current) return;
       console.error("Products fetch error:", error);
       toast.error(
         error.response?.data?.detail || "Failed to load products"
       );
     } finally {
-      setLoading(false);
+      if (request === productRequest.current) setLoading(false);
     }
   }, [
     page,
@@ -217,11 +253,8 @@ export default function Products() {
   ]);
 
   useEffect(() => {
-    fetchFilters();
-  }, [fetchFilters]);
-
-  useEffect(() => {
     fetchProducts();
+    return () => { productRequest.current += 1; };
   }, [fetchProducts]);
 
   const syncProduct = async (productId, type) => {
@@ -444,16 +477,25 @@ export default function Products() {
 
   const handleSupplierChange = (value) => {
     setSupplier(value);
+    setCategory("all");
+    setBrand("all");
+    setCategories([]);
+    setBrands([]);
+    setSelectedProducts(new Set());
     setPage(1);
   };
 
   const handleCategoryChange = (value) => {
     setCategory(value);
+    setBrand("all");
+    setBrands([]);
+    setSelectedProducts(new Set());
     setPage(1);
   };
 
   const handleBrandChange = (value) => {
     setBrand(value);
+    setSelectedProducts(new Set());
     setPage(1);
   };
 
@@ -540,6 +582,7 @@ export default function Products() {
 
         <Select
           value={category}
+          disabled={categoriesLoading}
           onValueChange={handleCategoryChange}
         >
           <SelectTrigger
@@ -551,7 +594,7 @@ export default function Products() {
 
           <SelectContent className="bg-zinc-900 border-zinc-800 rounded-none">
             <SelectItem value="all">
-              All Categories
+              {categoriesLoading ? "Loading categories…" : "All Categories"}
             </SelectItem>
 
             {categories.map((categoryItem) => (
@@ -567,6 +610,7 @@ export default function Products() {
 
         <Select
           value={brand}
+          disabled={brandsLoading}
           onValueChange={handleBrandChange}
         >
           <SelectTrigger
@@ -578,7 +622,7 @@ export default function Products() {
 
           <SelectContent className="bg-zinc-900 border-zinc-800 rounded-none">
             <SelectItem value="all">
-              All Brands
+              {brandsLoading ? "Loading brands…" : "All Brands"}
             </SelectItem>
 
             {brands.map((brandItem) => (
@@ -674,6 +718,8 @@ export default function Products() {
           </Button>
         </div>
       </div>
+
+      {filterError && <p role="alert" className="text-sm text-amber-400">{filterError}</p>}
 
       {viewMode === "list" && (
         <div className="flex items-center justify-between p-3 bg-zinc-900/50 border border-zinc-800">
