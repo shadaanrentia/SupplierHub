@@ -1,7 +1,7 @@
 import "@/App.css";
 import "@/lib/axios"; // Initialize axios interceptors
 import { useState, useEffect } from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 import Layout from "@/components/Layout";
 import Dashboard from "@/pages/Dashboard";
@@ -18,6 +18,39 @@ import Register from "@/pages/Register";
 import ForgotPassword from "@/pages/ForgotPassword";
 import Users from "@/pages/Users";
 import ExportReview from "@/pages/ExportReview";
+
+function PageTitle() {
+  const { pathname } = useLocation();
+
+  useEffect(() => {
+    const path = pathname.replace(/\/+$/, "") || "/";
+    const titles = {
+      "/": "Dashboard",
+      "/dashboard": "Dashboard",
+      "/products": "Products",
+      "/product-search": "Product Search",
+      "/suppliers": "Suppliers",
+      "/sync": "Sync Jobs",
+      "/category-mapping": "Category Mapping",
+      "/preprocessing": "Pre-processing",
+      "/export-review": "Export Review",
+      "/settings": "Settings",
+      "/users": "Users",
+      "/login": "Sign In",
+      "/register": "Create Account",
+      "/forgot-password": "Reset Password",
+    };
+
+    let title = titles[path];
+    if (!title && path.startsWith("/products/")) title = "Product Details";
+    if (!title && path.startsWith("/export-review/")) title = "Export Review";
+
+    const brand = "SupplierHub | Red Leafs Sports";
+    document.title = title ? `${title} | ${brand}` : brand;
+  }, [pathname]);
+
+  return null;
+}
 
 function App() {
   const [user, setUser] = useState(null);
@@ -53,6 +86,7 @@ function App() {
   return (
     <div className="App">
       <BrowserRouter>
+        <PageTitle />
         <Routes>
           {/* Public routes */}
           <Route path="/login" element={user ? <Navigate to="/" replace /> : <Login onLogin={handleLogin} />} />
