@@ -222,38 +222,38 @@ async def sync_products_bulk(product_ids:List[str],sync_type:str=Query(...,patte
 
 
 @router.post('/sync/products/{supplier_id}')
-async def sync_products(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=1,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
+async def sync_products(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=0,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
     return await launch(supplier_id,'products',background_tasks,limit,skus)
 
 
 @router.post('/sync/inventory/{supplier_id}')
-async def sync_inventory(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=1,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
+async def sync_inventory(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=0,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
     return await launch(supplier_id,'inventory',background_tasks,limit,skus)
 
 
 @router.post('/sync/pricing/{supplier_id}')
-async def sync_pricing(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=1,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
+async def sync_pricing(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=0,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
     return await launch(supplier_id,'pricing',background_tasks,limit,skus)
 
 
 @router.post('/sync/refresh/{supplier_id}')
-async def refresh_details(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=1,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
+async def refresh_details(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=0,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
     """Pricing, inventory and media in parallel for already imported products."""
     return await launch(supplier_id,'refresh',background_tasks,limit,skus)
 
 
 @router.post('/sync/media/{supplier_id}')
-async def sync_media(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=1,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
+async def sync_media(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=0,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
     return await launch(supplier_id,'media',background_tasks,limit,skus)
 
 
 @router.post('/sync/full/{supplier_id}')
-async def sync_full(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=1,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
+async def sync_full(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=0,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
     return await launch(supplier_id,'full',background_tasks,limit,skus)
 
 
 @router.post('/sync/all/{supplier_id}')
-async def sync_all(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=1,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
+async def sync_all(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=0,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
     return await launch(supplier_id,'full',background_tasks,limit,skus)
 
 
@@ -301,7 +301,7 @@ async def import_bulk_cache(supplier_id:str,xml:str=Body(...,embed=True),user=De
 
 
 @router.post('/sync/enrich-categories/{supplier_id}')
-async def enrich_categories(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=1,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
+async def enrich_categories(supplier_id:str,background_tasks:BackgroundTasks,limit:int=Query(1500,ge=0,le=10000),skus:Optional[str]=None,user=Depends(get_current_user)):
     return await launch(supplier_id,'enrich_categories',background_tasks,limit,skus)
 
 
@@ -505,6 +505,8 @@ async def apply_result(supplier_id,sku,stage,result):
 
 
 async def seed_items(log_id,supplier_id,kind,limit,connector,event):
+    # Zero means all products; SQL LIMIT NULL and Python [:None] are unbounded.
+    limit = None if limit == 0 else limit
     stages=['products','pricing','inventory','media'] if kind=='full' else (['pricing','inventory','media'] if kind=='refresh' else [kind])
     async with deps.pool.acquire() as conn:
         selected=decode(await conn.fetchval('SELECT product_skus FROM supplier_sync_details WHERE log_id=$1',log_id)) or []
@@ -621,7 +623,10 @@ async def run_job(supplier_id,log_id):
         if not supplier:raise ValueError('Supplier no longer exists')
         connector=make_connector(row_to_dict(supplier))
         if getattr(connector,'import_only',False):
-            connector.discovery_limit=claimed['item_limit']
+            # Existing connectors use integer comparisons/slices during pagination.
+            # sys.maxsize removes the user cap while preserving that interface.
+            import sys
+            connector.discovery_limit=claimed['item_limit'] or sys.maxsize
             if log['sync_type'] in ('bulk_data','enrich_categories'):raise JobFailure({'error_code':'UNSUPPORTED','error':'Use Products or Full sync for this supplier; SanMar BulkData and CSV enrichment do not apply'})
         if supplier.get('bulk_data_url'):
             connector.services['bulk_data']=supplier['bulk_data_url'].split('?')[0]
@@ -834,4 +839,5 @@ async def odoo_push_task(supplier_id: str, log_id: str):
     except Exception as e:
         logger.error("Odoo push task error: %s", e)
         await update_sync_log(log_id, 'failed', f'Error: {str(e)}')
+
 
