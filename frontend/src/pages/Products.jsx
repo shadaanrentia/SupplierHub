@@ -26,6 +26,7 @@ import {
   Loader2,
   MoreVertical,
   Trash2,
+  Download,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -132,6 +133,8 @@ export default function Products() {
   const [syncing, setSyncing] = useState({});
   const [selectedProducts, setSelectedProducts] = useState(new Set());
   const [deleting, setDeleting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const exportLock = useRef(false);
 
   const [categoriesLoading, setCategoriesLoading] = useState(true);
   const [brandsLoading, setBrandsLoading] = useState(true);
@@ -465,6 +468,36 @@ export default function Products() {
     }
   };
 
+  const exportSupplierList = async () => {
+    if (supplier === 'all' || exportLock.current) return;
+    exportLock.current = true;
+    setExporting(true);
+    const supplierName = suppliers.find(item => item.id === supplier)?.supplier_name || 'Supplier';
+    try {
+      const response = await axios.get(`${API}/products/export.xlsx`, {
+        params: { supplier_id: supplier }, responseType: 'blob', timeout: 300000,
+      });
+      const url = window.URL.createObjectURL(response.data);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${supplierName.replace(/[^a-zA-Z0-9_-]+/g, '_')}_products.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => window.URL.revokeObjectURL(url), 10000);
+      toast.success('Supplier product list downloaded');
+    } catch (error) {
+      let message = 'Unable to export the supplier product list';
+      if (error.response?.data instanceof Blob) {
+        try { message = JSON.parse(await error.response.data.text()).detail || message; } catch (_) { /* Keep fallback. */ }
+      }
+      toast.error(typeof message === 'string' ? message : 'Unable to export products');
+    } finally {
+      exportLock.current = false;
+      setExporting(false);
+    }
+  };
+
   const handleSearch = (event) => {
     event.preventDefault();
 
@@ -687,6 +720,13 @@ export default function Products() {
             </SelectItem>
           </SelectContent>
         </Select>
+
+        <Button type="button" variant="outline" disabled={supplier === 'all' || exporting}
+          onClick={exportSupplierList} title={supplier === 'all' ? 'Select a supplier to export' : 'Export all products from this supplier'}
+          className="rounded-none border-zinc-700 text-zinc-200 hover:bg-zinc-800" data-testid="export-supplier-list">
+          {exporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin"/> : <Download className="w-4 h-4 mr-2"/>}
+          {exporting ? 'Exporting…' : 'Export list'}
+        </Button>
 
         <div className="flex border border-zinc-800 ml-auto">
           <Button
@@ -1295,3 +1335,4 @@ export default function Products() {
     </div>
   );
 }
+

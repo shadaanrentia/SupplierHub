@@ -27,6 +27,99 @@ async def get_brands(supplier_id: Optional[str] = None, category: Optional[str] 
             ORDER BY brand""", supplier_id if supplier_id and supplier_id != 'all' else None,
             category if category and category != 'all' else None)
         return {"brands": [r["brand"] for r in rows]}
+
+
+def build_supplier_workbook(rows):
+    """Produce typed Excel cells; supplier-provided strings are never formulas."""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    from openpyxl.utils import get_column_letter
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = 'Products'
+    sheet.append(['sl_no', 'product_name', 'sku', 'variants', 'brand',
+                  'supplier_category', 'supplier_price', 'retail_price'])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.fill = PatternFill('solid', fgColor='17365D')
+        cell.alignment = Alignment(vertical='center')
+    sheet.row_dimensions[1].height = 25
+    for index, row in enumerate(rows, 1):
+        sheet.append([index, row.get('product_name') or '', row.get('supplier_sku') or '',
+                      row.get('variant_count', 0), row.get('brand') or '',
+                      row.get('category') or '', row.get('export_cost'), row.get('export_retail')])
+        for column in (2, 3, 5, 6):
+            cell = sheet.cell(index + 1, column)
+            cell.value = ILLEGAL_CHARACTERS_RE.sub('', str(cell.value or ''))[:32767]
+            cell.data_type = 's'
+            cell.number_format = '@'
+        for column in (7, 8):
+            sheet.cell(index + 1, column).number_format = '#,##0.00'
+    for column, width in enumerate((9, 56, 25, 14, 28, 56, 20, 20), 1):
+        sheet.column_dimensions[get_column_letter(column)].width = width
+    sheet.freeze_panes = 'A2'
+    sheet.auto_filter.ref = sheet.dimensions
+    stream = BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    return stream
+
+
+@router.get('/products/export.xlsx')
+async def export_supplier_products(supplier_id: str = Query(..., min_length=1), user: dict = Depends(get_current_user)):
+    import asyncio
+    import math
+    import re
+    from datetime import datetime, timezone
+    from fastapi.responses import StreamingResponse
+    from pricing_rules import ensure_pricing_schema, category_policies, apply_category_policy, pricing_policy, price_for
+    from product_readiness import load_readiness
+
+    if supplier_id == 'all':
+        raise HTTPException(400, 'Select a supplier before exporting')
+    await ensure_pricing_schema()
+    async with deps.pool.acquire() as conn:
+        async with conn.transaction(isolation='repeatable_read', readonly=True):
+            supplier = await conn.fetchrow('SELECT supplier_name FROM suppliers WHERE id=$1', supplier_id)
+            if not supplier:
+                raise HTTPException(404, 'Supplier not found')
+            # Export the complete supplier catalogue, independent of page/search/visibility filters.
+            products = [dict(row) for row in await conn.fetch("""SELECT p.*,
+                (SELECT COUNT(*) FROM product_variants v WHERE v.product_id=p.id
+                 AND v.is_active IS DISTINCT FROM FALSE) AS variant_count
+                FROM products p WHERE p.supplier_id=$1
+                ORDER BY LOWER(COALESCE(p.product_name,'')), p.supplier_sku, p.id""", supplier_id)]
+            settings = await conn.fetchrow("SELECT markup_percentage FROM settings WHERE id='system_settings'")
+            markup = settings['markup_percentage'] if settings and settings['markup_percentage'] is not None else 40
+            policies = await category_policies(conn)
+            for offset in range(0, len(products), 200):
+                batch = products[offset:offset + 200]
+                states = await load_readiness(conn, batch)
+                for product in batch:
+                    product['export_cost'] = None
+                    product['export_retail'] = None
+                    try:
+                        cost = float(product.get('base_price'))
+                        if math.isfinite(cost) and cost > 0:
+                            product['export_cost'] = cost
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                    state = states[product['id']]
+                    priced = apply_category_policy(product, state['mapped_lightspeed_category_id'], policies)
+                    try:
+                        if product['export_cost'] is not None and not product.get('price_needs_review'):
+                            policy = pricing_policy(priced, state['variants'], markup)
+                            product['export_retail'] = price_for(product['export_cost'], policy)
+                    except (TypeError, ValueError, OverflowError):
+                        pass  # Keep every product; an uncomputable retail price stays blank.
+    stream = await asyncio.to_thread(build_supplier_workbook, products)
+    name = re.sub(r'[^A-Za-z0-9_-]+', '_', supplier['supplier_name'] or 'Supplier').strip('_') or 'Supplier'
+    filename = name[:80] + '_products_' + datetime.now(timezone.utc).strftime('%Y-%m-%d') + '.xlsx'
+    return StreamingResponse(stream, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': 'attachment; filename="' + filename + '"', 'Cache-Control': 'no-store'})
+
 @router.get("/products")
 async def get_products(
     supplier_id: Optional[str] = None,
