@@ -15,6 +15,7 @@ ALLOWED_DOMAINS = (
     'media.sanmarcanada.com', 'sanmarcanada.com', 'cdn-atc.ca',
     'images.atc.ca', 'atc.ca', 'cdn.ssactivewear.com', 'ssactivewear.com',
     'media.alphabroder.com', 'alphabroder.com',
+    'athleticknit.com', 'caldwellrecognition.com',
 )
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_CACHE_BYTES = 48 * 1024 * 1024
@@ -81,7 +82,7 @@ async def fetch_image(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 SupplierHub/1.0',
         'Accept': 'image/*', 'Accept-Language': 'en-CA,en;q=0.9',
-        'Referer': 'https://www.sanmarcanada.com/',
+        'Referer': 'https://' + validate_url(url) + '/',
     }
     async with _slots:
         async with httpx.AsyncClient(
@@ -150,3 +151,77 @@ async def media_proxy(url: str):
         'Cache-Control': 'public, max-age=3600',
         'Access-Control-Allow-Origin': '*', 'X-Content-Type-Options': 'nosniff',
     })
+
+
+
+async def cache_product_images(product_id):
+    """Persist validated supplier bytes using the existing image_base64 column.
+
+    Never hold a database connection while downloading. Existing copies are retained
+    on failures, and existing URLs/variant associations are not changed.
+    """
+    import base64
+    import deps
+    async with deps.pool.acquire() as conn:
+        rows = await conn.fetch("""SELECT id,url,
+            COALESCE(image_base64,'')<>'' AS stored
+            FROM product_media WHERE product_id=$1 AND media_type='image'
+            ORDER BY is_primary DESC,created_at""", product_id)
+
+    async def save(row):
+        if row['stored']:
+            return 'cached', ''
+        url = str(row['url'] or '').strip()
+        try:
+            validate_url(url)
+            # A previous download can be shared across size/colour variants.
+            cached = cache_get(url)
+            content, kind = cached or await fetch_image(url)
+            encoded = 'data:' + kind + ';base64,' + base64.b64encode(content).decode('ascii')
+            async with deps.pool.acquire() as conn:
+                await conn.execute("""UPDATE product_media SET image_base64=$3
+                    WHERE id=$1 AND url=$2 AND COALESCE(image_base64,'')=''""",
+                    row['id'],url,encoded)
+            return 'downloaded', ''
+        except HTTPException as exc:
+            return 'failed', str(exc.detail)
+        except Exception:
+            logger.exception('Could not persist supplier image media_id=%s',row['id'])
+            return 'failed', 'Image could not be saved; check backend logs'
+
+    # Avoid creating one concurrent task per image in large catalogues.
+    results = []
+    for offset in range(0,len(rows),6):
+        results.extend(await asyncio.gather(*(save(row) for row in rows[offset:offset+6])))
+    return {'downloaded':sum(status=='downloaded' for status,_ in results),
+            'cached':sum(status=='cached' for status,_ in results),
+            'failed':sum(status=='failed' for status,_ in results),
+            'errors':list(dict.fromkeys(error for status,error in results if status=='failed'))[:3]}
+
+
+@router.get('/media/{media_id}/content')
+async def stored_image(media_id: str):
+    """Serve database copies only. This read never calls a supplier."""
+    import base64
+    import binascii
+    import hashlib
+    import deps
+    async with deps.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT image_base64 FROM product_media WHERE id=$1 AND media_type='image'",media_id)
+    if not row or not row['image_base64']:
+        raise HTTPException(404,'Image is not stored yet; run supplier Media sync')
+    try:
+        encoded = str(row['image_base64'])
+        header = ''
+        if encoded.startswith('data:'):
+            header,encoded = encoded.split(',',1)
+        if len(encoded) > (MAX_IMAGE_BYTES * 4 // 3 + 8):
+            raise ValueError('Image too large')
+        content = base64.b64decode(encoded,validate=True)
+        kind = image_type(header[5:].split(';',1)[0],content)
+    except (ValueError,binascii.Error) as exc:
+        raise HTTPException(502,'Stored image data is invalid; refresh supplier media') from exc
+    return Response(content,media_type=kind,headers={
+        'Cache-Control':'public, max-age=3600',
+        'ETag':'"'+hashlib.sha256(content).hexdigest()+'"',
+        'X-Content-Type-Options':'nosniff'})

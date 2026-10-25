@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowLeft, Package, Image, Tag, Layers } from "lucide-react";
 import { toast } from "sonner";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "") + "/api";
 
 export default function ProductDetail() {
   const { id } = useParams();
@@ -223,14 +223,15 @@ export default function ProductDetail() {
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                 {product.media.map((m, i) => {
                   // Use media proxy to bypass CDN restrictions
-                  const proxyUrl = m.url ? `${API}/media_proxy?url=${encodeURIComponent(m.url)}` : '';
+                  const localUrl = m.local_url ? `${API.replace(/\/api$/, '')}${m.local_url}` : '';
+                  const proxyUrl = localUrl || (m.url ? `${API}/media_proxy?url=${encodeURIComponent(m.url)}` : '');
                   return (
                     <Card key={m.id || i} className="bg-zinc-900/50 border-zinc-800 rounded-sm overflow-hidden group">
                       <div className="w-full h-48 bg-zinc-800 flex items-center justify-center relative">
                         <img 
                           src={proxyUrl} 
                           alt={m.description || "Product"} 
-                          className="w-full h-full object-cover" 
+                          className="w-full h-full object-contain" 
                           onError={(e) => { 
                             e.target.style.display = 'none'; 
                             e.target.nextSibling.style.display = 'flex';
@@ -240,18 +241,18 @@ export default function ProductDetail() {
                           <Image className="w-8 h-8 mb-2" strokeWidth={1} />
                           <p className="text-xs text-center mb-2">Image unavailable</p>
                           <a 
-                            href={m.url} 
+                            href={proxyUrl || undefined} 
                             target="_blank" 
                             rel="noopener noreferrer"
                             className="text-xs text-blue-400 hover:text-blue-300 underline"
                           >
-                            Open original
+                            {localUrl ? 'Open saved image' : 'Open image'}
                           </a>
                         </div>
                       </div>
                       <CardContent className="p-2">
                         <a 
-                          href={m.url} 
+                          href={proxyUrl || undefined} 
                           target="_blank" 
                           rel="noopener noreferrer"
                           className="text-xs font-mono text-zinc-500 hover:text-zinc-300 truncate block" 
@@ -264,12 +265,8 @@ export default function ProductDetail() {
                   );
                 })}
               </div>
-              <div className="mt-4 p-3 bg-amber-900/20 border border-amber-800/50 rounded-sm">
-                <p className="text-xs text-amber-400">
-                  <strong>Note:</strong> Some supplier images may not load due to CDN bot protection.
-                  Click on the image URL to open the original in a new tab (may require verification).
-                </p>
-              </div>
+              {product.media.some(m => m.media_type === 'image' && !m.stored_locally) &&
+                <p className="mt-3 text-xs text-zinc-400">Some images are not saved yet. Run Media sync for this supplier to download them.</p>}
             </>
           ) : (
             <div className="flex flex-col items-center justify-center py-20 text-zinc-600">
@@ -292,3 +289,4 @@ function InfoRow({ label, value, mono }) {
     </div>
   );
 }
+

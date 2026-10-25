@@ -196,29 +196,19 @@ async def get_products(
                 p.*,
                 s.supplier_name,
                 (
-                    SELECT pm.url
+                    SELECT CASE WHEN COALESCE(pm.image_base64,'')<>''
+                        THEN '/api/media/' || pm.id || '/content' ELSE pm.url END
                     FROM product_media pm
                     WHERE pm.product_id = p.id
                     AND pm.media_type = 'image'
-                    AND pm.url IS NOT NULL
-                    AND pm.url != ''
+                    AND (COALESCE(pm.url,'')<>'' OR COALESCE(pm.image_base64,'')<>'')
                     ORDER BY
+                        (COALESCE(pm.image_base64,'')<>'') DESC,
                         pm.is_primary DESC,
                         pm.created_at ASC
                     LIMIT 1
                 ) AS thumbnail,
-                (
-                    SELECT pm.image_base64
-                    FROM product_media pm
-                    WHERE pm.product_id = p.id
-                    AND pm.media_type = 'image'
-                    AND pm.image_base64 IS NOT NULL
-                    AND pm.image_base64 != ''
-                    ORDER BY
-                        pm.is_primary DESC,
-                        pm.created_at ASC
-                    LIMIT 1
-                ) AS thumbnail_base64,
+                NULL::text AS thumbnail_base64,
                 (
                     SELECT COUNT(*)
                     FROM product_variants pv
@@ -328,7 +318,14 @@ async def get_product(
             """,
             product_id
         )
-        media = [row_to_dict(m) for m in media_rows]
+        media = []
+        for row in media_rows:
+            item = row_to_dict(row)
+            item['stored_locally'] = bool(item.get('image_base64'))
+            item['local_url'] = '/api/media/' + str(item['id']) + '/content' if item['stored_locally'] else None
+            # Images are served by the image endpoint, not repeated in detail JSON.
+            item.pop('image_base64', None)
+            media.append(item)
         settings = await conn.fetchrow(
             """
             SELECT preferred_warehouse
@@ -438,3 +435,4 @@ async def delete_all_products(user: dict = Depends(get_admin_user)):
         await conn.execute("DELETE FROM product_media")
         await conn.execute("DELETE FROM products")
         return {"status": "deleted", "count": count}
+

@@ -474,7 +474,7 @@ async def _apply_result(supplier_id,sku,stage,result):
             return 'succeeded','',f'{changed} records updated'
 
 
-async def apply_result(supplier_id,sku,stage,result):
+async def _apply_result_with_metadata(supplier_id,sku,stage,result):
     status,code,message=await _apply_result(supplier_id,sku,stage,result)
     if not result.get('success') or not result.get('import_only'):return status,code,message
     product=result.get('product') or {}
@@ -501,6 +501,22 @@ async def apply_result(supplier_id,sku,stage,result):
     if stage=='products' and product.get('_import_media'):
         media_status,media_code,media_message=await _apply_result(supplier_id,sku,'media',dict(success=True,media=product['_import_media']))
         if media_status=='failed':return media_status,media_code,media_message
+    return status,code,message
+
+
+async def apply_result(supplier_id,sku,stage,result):
+    status,code,message = await _apply_result_with_metadata(supplier_id,sku,stage,result)
+    imported_media = stage=='products' and bool((result.get('product') or {}).get('_import_media'))
+    if result.get('success') and (stage=='media' or imported_media):
+        from routes.media import cache_product_images
+        async with deps.pool.acquire() as conn:
+            pid = await conn.fetchval('SELECT id FROM products WHERE supplier_id=$1 AND supplier_sku=$2',supplier_id,sku)
+        if pid:
+            images = await cache_product_images(pid)
+            message += f"; images stored: {images['downloaded']} downloaded, {images['cached']} already saved, {images['failed']} failed"
+            if images['failed']:
+                status,code = 'failed','IMAGE_DOWNLOAD_FAILED'
+                message += '; ' + '; '.join(images['errors'])
     return status,code,message
 
 
@@ -839,5 +855,6 @@ async def odoo_push_task(supplier_id: str, log_id: str):
     except Exception as e:
         logger.error("Odoo push task error: %s", e)
         await update_sync_log(log_id, 'failed', f'Error: {str(e)}')
+
 
 
