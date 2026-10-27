@@ -69,7 +69,7 @@ export default function ProductPreprocessing() {
       const res = await axios.get(`${API}/preprocessing/products?${params}`);
       if(version!==requestVersion.current) return;
       setProducts(res.data.products || []);
-      setSelectedProducts(current=>new Set([...current].filter(id=>!(res.data.products || []).some(p=>p.id===id && !p.can_sync))));
+      setSelectedProducts(current=>new Set([...current].filter(id=>!(res.data.products || []).some(p=>p.id===id && !p.can_sync && !p.can_update))));
       setTotal(res.data.total || 0);
     } catch (e) {
       if(version===requestVersion.current) setLoadError(typeof e.response?.data?.detail==='string'?e.response.data.detail:'Could not load products. Try again.');
@@ -84,12 +84,13 @@ export default function ProductPreprocessing() {
     setReadyLoading(true);setReadyError('');setReadyIds([]);
     axios.get(`${API}/preprocessing/ready-ids`, {signal:controller.signal, params:{
       search:searchQuery, ...(supplierId!=='all' && {supplier_id:supplierId}),
-      ...(statusFilter!=='all' && {status:statusFilter}),
+      ...(statusFilter!=='all' && {status:statusFilter}), include_synced:statusFilter==='synced',
     }}).then(response=>{
       if(version!==readyVersion.current)return;
       const ids=response.data.product_ids || [];
       setReadyIds(ids);
-      setSelectedProducts(current=>new Set([...current].filter(id=>ids.includes(id))));
+      const selectable=response.data.selectable_ids || ids;
+      setSelectedProducts(current=>new Set([...current].filter(id=>selectable.includes(id))));
     }).catch(error=>{
       if(version===readyVersion.current && !controller.signal.aborted)setReadyError('Could not load ready products. Refresh to retry.');
     }).finally(()=>{if(version===readyVersion.current && !controller.signal.aborted)setReadyLoading(false);});
@@ -162,7 +163,7 @@ export default function ProductPreprocessing() {
         toast.error(`Failed to sync ${res.data.failed} products`);
       }
       if(res.data.images_pending || res.data.needs_review) toast.warning(`${res.data.images_pending || res.data.needs_review} products have images pending; inspect Export Review`);
-      if(res.data.skipped) toast.info(`${res.data.skipped} products skipped: not ready or already synced`);
+      if(res.data.skipped) toast.info(`${res.data.skipped} products skipped: not eligible for this operation`);
       if(res.data.errors?.length) toast.error(res.data.errors[0].error);
       setSelectedProducts(new Set());
       fetchProducts();
@@ -367,8 +368,8 @@ export default function ProductPreprocessing() {
                 </SelectContent>
               </Select>
               <input aria-label="Search preprocessing products" placeholder="Search product name or SKU" value={search} disabled={syncing} onChange={event=>setSearch(event.target.value)} className="pp-search bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
-              <Button disabled={loading || syncing || readyLoading || !!readyError || !readyIds.length} aria-label="Select all ready products matching these filters" variant="outline" size="sm" onClick={selectAllVisible}>
-                Select ready
+              <Button disabled={loading || syncing || readyLoading || !!readyError || !readyIds.length} aria-label="Select eligible products matching these filters" variant="outline" size="sm" onClick={selectAllVisible}>
+                {statusFilter==='synced'?'Select synced':'Select ready'}
               </Button>
               <Button disabled={syncing || !selectedProducts.size} variant="outline" size="sm" onClick={deselectAll}>
                 Clear selection
@@ -393,8 +394,8 @@ export default function ProductPreprocessing() {
                         <Checkbox checked={allReadySelected ? true : readySelectedCount>0 ? 'indeterminate' : false}
                           onCheckedChange={checked=>toggleAllReady(checked===true)}
                           disabled={syncing || loading || readyLoading || !!readyError || !readyIds.length}
-                          aria-label="Select all ready products matching these filters, across all pages"
-                          title={`Select all ${readyIds.length} ready products across all pages`}/>
+                          aria-label="Select all eligible products matching these filters, across all pages"
+                          title={`Select all ${readyIds.length} ${statusFilter==='synced'?'synced':'ready'} products across all pages`}/>
                       </th>
                       <th className="text-left py-2 px-3">Product</th>
                       <th className="text-left py-2 px-3">Category</th>
@@ -416,7 +417,7 @@ export default function ProductPreprocessing() {
                             checked={selectedProducts.has(product.id)}
                             aria-label={`Select ${product.supplier_sku}`}
                             onCheckedChange={() => toggleProductSelection(product.id)}
-                            disabled={!product.can_sync || syncing || loading || !!loadError}
+                            disabled={(!product.can_sync && !product.can_update) || syncing || loading || !!loadError}
                           />
                         </td>
                         <td className="py-2 px-3">
@@ -535,7 +536,7 @@ export default function ProductPreprocessing() {
                 data-testid="sync-selected-btn"
               >
                 {syncing ? <RefreshCw className="w-4 h-4 animate-spin mr-2" /> : <Upload className="w-4 h-4 mr-2" />}
-                Sync Selected ({selectedProducts.size})
+                Sync / Update Selected ({selectedProducts.size})
               </Button>
               <Button 
                 onClick={syncAll}
@@ -681,4 +682,5 @@ export default function ProductPreprocessing() {
     </div>
   );
 }
+
 

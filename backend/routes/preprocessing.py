@@ -112,6 +112,7 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
         if state['excluded_from_queue']: continue
         if status not in (None,'all') and state['status']!=status: continue
         product.update(public_state(state))
+        product['can_update']=bool(state['is_valid'] and state['status']=='synced')
         product['lightspeed_category_name']=destination_names.get(str(state['mapped_lightspeed_category_id']))
         product['product_name']=export_name(product.get('product_name'),product.get('supplier_sku'))
         cost=float(product.get('base_price') or 0)
@@ -119,17 +120,18 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
         try:
             product.update(pricing_summary(product, state['variants'], markup))
         except ValueError as exc:
-            product.update(calculated_sale_price=None, retail_price_min=None, retail_price_max=None, pricing_label='Pricing needs review', pricing_error=str(exc), is_valid=False, can_sync=False)
+            product.update(calculated_sale_price=None, retail_price_min=None, retail_price_max=None, pricing_label='Pricing needs review', pricing_error=str(exc), is_valid=False, can_sync=False, can_update=False)
         result.append(product)
     offset=(page-1)*limit
     return {'products':result[offset:offset+limit],'total':len(result),'page':page,'limit':limit,'markup_percentage':markup}
 
 
 @router.get('/preprocessing/ready-ids')
-async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id: str=None, user: dict=Depends(get_current_user)):
+async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id: str=None, include_synced: bool=False, user: dict=Depends(get_current_user)):
     import sys
     data=await get_preprocessing_products(page=1,limit=sys.maxsize,status=status,search=search,supplier_id=supplier_id,user=user)
-    return {'product_ids':[p['id'] for p in data['products'] if p.get('can_sync')]}
+    return {'product_ids':[p['id'] for p in data['products'] if p.get('can_sync') or (include_synced and p.get('can_update'))],
+            'selectable_ids':[p['id'] for p in data['products'] if p.get('can_sync') or p.get('can_update')]}
 
 
 @router.get('/preprocessing/summary')
@@ -301,6 +303,11 @@ async def sync_preprocessed_to_odoo(data: dict = None, user: dict = Depends(get_
         return {"success": True, "total": len(products), "synced": synced, "failed": failed, "errors": errors[:10]}
 
 
+def can_export_selected(state, explicit_selection=False):
+    # Automatic batches keep their existing scope; synced updates require selection.
+    return bool(state.get('can_sync') or (explicit_selection and state.get('is_valid') and state.get('status')=='synced'))
+
+
 @router.post('/preprocessing/sync-to-lightspeed')
 async def sync_preprocessed_to_lightspeed(data: dict=None, user: dict=Depends(get_current_user)):
     await ensure_pricing_schema()
@@ -320,8 +327,8 @@ async def sync_preprocessed_to_lightspeed(data: dict=None, user: dict=Depends(ge
         if selected and set(selected)-{p['id'] for p in candidates}:raise HTTPException(400,'Selected products do not belong to the selected supplier or no longer exist')
         if selected: candidates=[p for p in candidates if p['id'] in selected]
         states=await load_readiness(conn,candidates)
-        products=[p for p in candidates if states[p['id']]['can_sync']]
-        skipped=[{'product_id':p['id'],'sku':p.get('supplier_sku'),'error':'; '.join(states[p['id']]['validation_errors']) or 'Already synced'} for p in candidates if not states[p['id']]['can_sync']]
+        products=[p for p in candidates if can_export_selected(states[p['id']],bool(selected))]
+        skipped=[{'product_id':p['id'],'sku':p.get('supplier_sku'),'error':'; '.join(states[p['id']]['validation_errors']) or 'Already synced'} for p in candidates if not can_export_selected(states[p['id']],bool(selected))]
     synced,errors,needs_review=0,[],[]
     for product in products:
         # Recheck source state immediately before each write; stale UI cannot bypass it.
@@ -332,7 +339,7 @@ async def sync_preprocessed_to_lightspeed(data: dict=None, user: dict=Depends(ge
                 product=row_to_dict(current)
                 state=(await load_readiness(conn,[product]))[product['id']]
             if supplier_id and product.get('supplier_id') != supplier_id: raise ValueError('Product supplier changed; reload Pre-processing')
-            if not state['can_sync']: raise ValueError('; '.join(state['validation_errors']) or 'Already synced')
+            if not can_export_selected(state,bool(selected)): raise ValueError('; '.join(state['validation_errors']) or 'Already synced')
             product['lightspeed_category_id']=state['mapped_lightspeed_category_id']
             # Full Sync Selected must reconcile destinations even when only images were pending.
             # Image-only repair remains an explicit Export Review action.
@@ -387,4 +394,5 @@ async def preview_product_for_odoo(product_id: str, user: dict = Depends(get_cur
         }
         preview['validation']={'is_valid':readiness['is_valid'],'errors':readiness['validation_errors']}
         return preview
+
 
