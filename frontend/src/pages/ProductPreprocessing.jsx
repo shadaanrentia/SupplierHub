@@ -36,6 +36,10 @@ export default function ProductPreprocessing() {
   const [loadError, setLoadError] = useState('');
   const [syncing, setSyncing] = useState(false);
   const [selectedProducts, setSelectedProducts] = useState(new Set());
+  const [readyIds, setReadyIds] = useState([]);
+  const [readyLoading, setReadyLoading] = useState(true);
+  const [readyError, setReadyError] = useState('');
+  const readyVersion = useRef(0);
   const [previewProduct, setPreviewProduct] = useState(null);
   const [showPreview, setShowPreview] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -65,7 +69,7 @@ export default function ProductPreprocessing() {
       const res = await axios.get(`${API}/preprocessing/products?${params}`);
       if(version!==requestVersion.current) return;
       setProducts(res.data.products || []);
-      setSelectedProducts(current=>new Set([...current].filter(id=>(res.data.products || []).some(p=>p.id===id && p.can_sync))));
+      setSelectedProducts(current=>new Set([...current].filter(id=>!(res.data.products || []).some(p=>p.id===id && !p.can_sync))));
       setTotal(res.data.total || 0);
     } catch (e) {
       if(version===requestVersion.current) setLoadError(typeof e.response?.data?.detail==='string'?e.response.data.detail:'Could not load products. Try again.');
@@ -73,6 +77,27 @@ export default function ProductPreprocessing() {
       if(version===requestVersion.current) setLoading(false);
     }
   }, [page, statusFilter, searchQuery,supplierId]);
+
+  useEffect(() => {
+    const version=++readyVersion.current;
+    const controller=new AbortController();
+    setReadyLoading(true);setReadyError('');setReadyIds([]);
+    axios.get(`${API}/preprocessing/ready-ids`, {signal:controller.signal, params:{
+      search:searchQuery, ...(supplierId!=='all' && {supplier_id:supplierId}),
+      ...(statusFilter!=='all' && {status:statusFilter}),
+    }}).then(response=>{
+      if(version!==readyVersion.current)return;
+      const ids=response.data.product_ids || [];
+      setReadyIds(ids);
+      setSelectedProducts(current=>new Set([...current].filter(id=>ids.includes(id))));
+    }).catch(error=>{
+      if(version===readyVersion.current && !controller.signal.aborted)setReadyError('Could not load ready products. Refresh to retry.');
+    }).finally(()=>{if(version===readyVersion.current && !controller.signal.aborted)setReadyLoading(false);});
+    return()=>{controller.abort();readyVersion.current+=1;};
+  }, [searchQuery,statusFilter,supplierId,products]);
+  const readySelectedCount=readyIds.filter(id=>selectedProducts.has(id)).length;
+  const allReadySelected=readyIds.length>0 && readySelectedCount===readyIds.length;
+  const toggleAllReady=checked=>setSelectedProducts(checked ? new Set(readyIds) : new Set());
 
   const fetchSummary = useCallback(async () => {
     const version=++summaryVersion.current;
@@ -196,10 +221,7 @@ export default function ProductPreprocessing() {
     });
   };
 
-  const selectAllVisible = () => {
-    const validProducts = products.filter(p => p.can_sync);
-    setSelectedProducts(new Set(validProducts.map(p => p.id)));
-  };
+  const selectAllVisible = () => toggleAllReady(true);
 
   const deselectAll = () => {
     setSelectedProducts(new Set());
@@ -345,7 +367,7 @@ export default function ProductPreprocessing() {
                 </SelectContent>
               </Select>
               <input aria-label="Search preprocessing products" placeholder="Search product name or SKU" value={search} disabled={syncing} onChange={event=>setSearch(event.target.value)} className="pp-search bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
-              <Button disabled={loading || syncing} aria-label="Select ready products on this page" variant="outline" size="sm" onClick={selectAllVisible}>
+              <Button disabled={loading || syncing || readyLoading || !!readyError || !readyIds.length} aria-label="Select all ready products matching these filters" variant="outline" size="sm" onClick={selectAllVisible}>
                 Select ready
               </Button>
               <Button disabled={syncing || !selectedProducts.size} variant="outline" size="sm" onClick={deselectAll}>
@@ -356,7 +378,7 @@ export default function ProductPreprocessing() {
         </CardHeader>
         <CardContent aria-busy={loading}>
           {loadError && <div className="pp-load-error" role="alert"><span>{loadError}</span><button disabled={loading} onClick={fetchProducts}>Retry</button></div>}
-          <div className="pp-result-line" role="status">{loading?'Updating products…':`${total} products`} {selectedProducts.size>0 && <span>· {selectedProducts.size} selected</span>}</div>
+          <div className="pp-result-line" role="status">{loading?'Updating products…':`${total} products`} {selectedProducts.size>0 && <span>· {selectedProducts.size} selected</span>} {readyError && <span className="text-amber-400">{readyError}</span>}</div>
           {loading && !products.length ? (
             <div className="flex items-center justify-center py-10">
               <RefreshCw className="w-6 h-6 animate-spin text-zinc-500" />
@@ -367,7 +389,13 @@ export default function ProductPreprocessing() {
                 <table className="pp-table w-full text-sm">
                   <thead>
                     <tr className="border-b border-zinc-800 text-zinc-400">
-                      <th className="text-left py-2 px-3 w-10"></th>
+                      <th className="text-left py-2 px-3 w-10">
+                        <Checkbox checked={allReadySelected ? true : readySelectedCount>0 ? 'indeterminate' : false}
+                          onCheckedChange={checked=>toggleAllReady(checked===true)}
+                          disabled={syncing || loading || readyLoading || !!readyError || !readyIds.length}
+                          aria-label="Select all ready products matching these filters, across all pages"
+                          title={`Select all ${readyIds.length} ready products across all pages`}/>
+                      </th>
                       <th className="text-left py-2 px-3">Product</th>
                       <th className="text-left py-2 px-3">Category</th>
                       <th className="text-right py-2 px-3">Supplier Price</th>
@@ -400,16 +428,16 @@ export default function ProductPreprocessing() {
                           </div>
                         </td>
                         <td className="py-2 px-3">
-                          {(product.mapped_category_name || product.mapped_lightspeed_category_id) ? (
-                            <Badge variant="outline" className="pp-category bg-zinc-800/60 text-zinc-300 border-zinc-700">
-                              {product.mapped_category_name || "Lightspeed Mapped"}
+                          {product.mapped_lightspeed_category_id ? (
+                            <Badge variant="outline" className="pp-category bg-emerald-950/40 text-emerald-400 border-emerald-800">
+                              {product.lightspeed_category_name || "Mapped · name unavailable"}
                             </Badge>
                           ) : (
                             <Badge variant="outline" className="bg-red-900/20 text-red-400 border-red-800">
                               Not Mapped
                             </Badge>
                           )}
-                          <p className="pp-source-category">{product.category || 'No supplier category'}</p>
+                          <p className="pp-source-category">Supplier: {product.category || 'No supplier category'}</p>
                         </td>
                         <td className="pp-cost py-2 px-3 text-right font-mono text-zinc-400">
                           {formatPrice(product.cost_price)}
@@ -653,3 +681,4 @@ export default function ProductPreprocessing() {
     </div>
   );
 }
+

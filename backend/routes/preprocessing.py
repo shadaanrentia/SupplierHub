@@ -90,6 +90,20 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
         products=await catalog(conn,search,supplier_id)
         states=await load_readiness(conn,products)
         policies=await category_policies(conn)
+        destination_names={}
+        if await conn.fetchval("SELECT to_regclass('public.lightspeed_category_snapshots')"):
+            snapshot=await conn.fetchval("""SELECT categories FROM lightspeed_category_snapshots
+                WHERE store_domain=(SELECT BTRIM(lightspeed_store_id) FROM settings WHERE id='system_settings')""")
+            categories=json.loads(snapshot) if isinstance(snapshot,str) else (snapshot or [])
+            by_id={str(c.get('lightspeed_category_id') or c.get('id')):c for c in categories}
+            for cid,node in by_id.items():
+                names=[];seen=set();current=cid
+                while current in by_id and current not in seen:
+                    seen.add(current);item=by_id[current]
+                    name=item.get('category_name') or item.get('name')
+                    if name:names.insert(0,str(name))
+                    current=str(item.get('parent_id') or '')
+                if names:destination_names[cid]=' > '.join(names)
     result=[]
     for product in products:
         state=states[product['id']]
@@ -98,6 +112,7 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
         if state['excluded_from_queue']: continue
         if status not in (None,'all') and state['status']!=status: continue
         product.update(public_state(state))
+        product['lightspeed_category_name']=destination_names.get(str(state['mapped_lightspeed_category_id']))
         product['product_name']=export_name(product.get('product_name'),product.get('supplier_sku'))
         cost=float(product.get('base_price') or 0)
         product.update(cost_price=cost,markup_percentage=markup)
@@ -108,6 +123,13 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
         result.append(product)
     offset=(page-1)*limit
     return {'products':result[offset:offset+limit],'total':len(result),'page':page,'limit':limit,'markup_percentage':markup}
+
+
+@router.get('/preprocessing/ready-ids')
+async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id: str=None, user: dict=Depends(get_current_user)):
+    import sys
+    data=await get_preprocessing_products(page=1,limit=sys.maxsize,status=status,search=search,supplier_id=supplier_id,user=user)
+    return {'product_ids':[p['id'] for p in data['products'] if p.get('can_sync')]}
 
 
 @router.get('/preprocessing/summary')
@@ -365,3 +387,4 @@ async def preview_product_for_odoo(product_id: str, user: dict = Depends(get_cur
         }
         preview['validation']={'is_valid':readiness['is_valid'],'errors':readiness['validation_errors']}
         return preview
+

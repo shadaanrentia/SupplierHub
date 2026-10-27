@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Button } from "../components/ui/button";
 import { Checkbox } from "../components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { RefreshCw, FolderTree, ArrowRight, Check, X, Zap, ChevronRight } from "lucide-react";
+import { RefreshCw, FolderTree, ArrowRight, Check, X, Zap, ChevronRight, ChevronDown } from "lucide-react";
 
 const API = process.env.REACT_APP_BACKEND_URL + "/api";
 
@@ -75,6 +75,8 @@ function LegacyCategoryMapping() {
   const [categorySearch, setCategorySearch] = useState("");
   const [mappingPage, setMappingPage] = useState(1);
   const [platformPage, setPlatformPage] = useState(1);
+  const [expandedCategories,setExpandedCategories]=useState(new Set());
+  const [treeSearch,setTreeSearch]=useState('');
   const [categoryStatus, setCategoryStatus] = useState({});
   const alive = useRef(false);
   const categoryFingerprint = useRef(null);
@@ -173,7 +175,6 @@ function LegacyCategoryMapping() {
       if (!children.has(key)) children.set(key, []);
       children.get(key).push(category);
     });
-    children.forEach(rows => rows.sort((a,b) => String(a.category_name || "").localeCompare(String(b.category_name || ""))));
     const result = [];
     const seen = new Set();
     const roots = children.get(null) || [];
@@ -201,10 +202,32 @@ function LegacyCategoryMapping() {
     const parents = new Set(lightspeedCategories.map(c => c.parent_id).filter(Boolean).map(String));
     return lightspeedCategories.filter(c => !parents.has(String(c.lightspeed_category_id)));
   }, [lightspeedCategories]);
-  const platformRows = platform === "odoo" ? odooCategories : lsHierarchy;
+  const treeRows = useMemo(() => {
+    const ancestors=[];
+    return lsHierarchy.map((category,index)=>{
+      ancestors.length=category.level-1;
+      const id=String(category.lightspeed_category_id);
+      const row={...category,id,ancestors:[...ancestors],hasChildren:(lsHierarchy[index+1]?.level || 0)>category.level};
+      ancestors.push(id);
+      return row;
+    });
+  },[lsHierarchy]);
+  const visibleTreeRows = useMemo(() => {
+    const query=treeSearch.trim().toLocaleLowerCase();
+    if(query){
+      const included=new Set();
+      treeRows.forEach(row=>{if(String(row.category_name || '').toLocaleLowerCase().includes(query)){
+        included.add(row.id);row.ancestors.forEach(id=>included.add(id));
+      }});
+      return treeRows.filter(row=>included.has(row.id));
+    }
+    return treeRows.filter(row=>row.ancestors.every(id=>expandedCategories.has(id)));
+  },[treeRows,treeSearch,expandedCategories]);
+  const toggleCategory=id=>setExpandedCategories(current=>{const next=new Set(current);next.has(id)?next.delete(id):next.add(id);return next;});
+  const platformRows = platform === 'odoo' ? odooCategories : visibleTreeRows;
   const platformPages = Math.max(1, Math.ceil(platformRows.length / 50));
   const safePlatformPage = Math.min(platformPage, platformPages);
-  const visiblePlatformRows = platformRows.slice((safePlatformPage - 1) * 50, safePlatformPage * 50);
+  const visiblePlatformRows = platform === 'odoo' ? platformRows.slice((safePlatformPage - 1) * 50, safePlatformPage * 50) : platformRows;
   const mappingByName = useMemo(() => new Map(mappings.map(m => [m.supplier_category_name, m])), [mappings]);
 
   const syncCategories = async () => {
@@ -445,7 +468,15 @@ function LegacyCategoryMapping() {
           ) : (
             // Lightspeed categories — hierarchical (Level 1 / Level 2)
             lsHierarchy.length > 0 ? (
-              <div className="overflow-x-auto">
+              <div>
+              <div className="flex flex-wrap items-center gap-2 mb-3">
+                <input aria-label="Search Lightspeed categories" value={treeSearch} onChange={e=>setTreeSearch(e.target.value)}
+                  placeholder="Search categories" className="bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm min-w-0 flex-1"/>
+                <Button variant="outline" size="sm" disabled={!!treeSearch.trim()} onClick={()=>setExpandedCategories(new Set(treeRows.filter(row=>row.hasChildren).map(row=>row.id)))}>Expand all</Button>
+                <Button variant="outline" size="sm" onClick={()=>{setTreeSearch('');setExpandedCategories(new Set());}}>Collapse all</Button>
+                <span className="text-xs text-zinc-500">{lightspeedCategories.length} categories</span>
+              </div>
+              <div className="overflow-auto max-h-[560px] border border-zinc-800 rounded-sm">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-zinc-800 text-zinc-400">
@@ -461,17 +492,16 @@ function LegacyCategoryMapping() {
                         data-testid={`ls-category-row-${cat.lightspeed_category_id}`}
                       >
                         <td className="py-2 px-3">
-                          {cat.level === 1 ? (
-                            <span className="text-zinc-100 font-medium flex items-center gap-1.5">
-                              <FolderTree className="w-3.5 h-3.5 text-emerald-400" />
-                              {cat.category_name}
-                            </span>
-                          ) : (
-                            <span className="text-zinc-300 flex items-center gap-1.5 pl-6">
-                              <ChevronRight className="w-3 h-3 text-zinc-600" />
-                              {cat.category_name}
-                            </span>
-                          )}
+                          <div className="flex items-center gap-2" style={{paddingLeft:(cat.level-1)*24}}>
+                            {cat.hasChildren ? <button type="button" aria-expanded={treeSearch.trim()?true:expandedCategories.has(cat.id)}
+                              aria-label={`${expandedCategories.has(cat.id)?'Collapse':'Expand'} ${cat.category_name}`}
+                              onClick={()=>toggleCategory(cat.id)} disabled={!!treeSearch.trim()}
+                              className="flex items-center gap-2 text-left text-zinc-100 font-medium hover:text-emerald-300 py-1 min-w-0">
+                              {treeSearch.trim() || expandedCategories.has(cat.id)?<ChevronDown className="w-4 h-4 shrink-0 text-emerald-400"/>:<ChevronRight className="w-4 h-4 shrink-0 text-zinc-400"/>}
+                              <FolderTree className="w-4 h-4 shrink-0 text-emerald-400"/>
+                              <span>{cat.category_name}</span>
+                            </button> : <span className="flex items-center gap-2 text-zinc-300 py-1"><span className="w-4 shrink-0"/><span className="w-4 shrink-0 text-center text-zinc-600">·</span>{cat.category_name}</span>}
+                          </div>
                         </td>
                         <td className="py-2 px-3">
                           <span className={`text-xs px-2 py-0.5 rounded-none font-mono ${cat.level === 1 ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-800' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}`}>
@@ -482,6 +512,8 @@ function LegacyCategoryMapping() {
                     ))}
                   </tbody>
                 </table>
+                {!visibleTreeRows.length && <p className="p-4 text-sm text-zinc-500">No matching categories.</p>}
+              </div>
               </div>
             ) : (
               <div className="text-center py-10 text-zinc-500">
@@ -491,7 +523,7 @@ function LegacyCategoryMapping() {
               </div>
             )
           )}
-          {platformRows.length > 50 && <div className="flex flex-wrap items-center justify-end gap-3 mt-4 pt-4 border-t border-zinc-800">
+          {platform === "odoo" && platformRows.length > 50 && <div className="flex flex-wrap items-center justify-end gap-3 mt-4 pt-4 border-t border-zinc-800">
             <Button variant="outline" size="sm" disabled={safePlatformPage <= 1} onClick={() => setPlatformPage(safePlatformPage - 1)}>Previous</Button>
             <span className="text-xs text-zinc-400">{safePlatformPage} / {platformPages} · {platformRows.length} categories</span>
             <Button variant="outline" size="sm" disabled={safePlatformPage >= platformPages} onClick={() => setPlatformPage(safePlatformPage + 1)}>Next</Button>
@@ -618,3 +650,4 @@ export default function CategoryMapping() {
     <Button variant={mode==='defaults'?'default':'outline'} onClick={() => setMode('defaults')}>Category pricing &amp; measurements</Button>
   </div>{mode==='defaults'?<CategoryPolicyManager />:<LegacyCategoryMapping />}</>;
 }
+
