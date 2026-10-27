@@ -84,7 +84,7 @@ export default function ProductPreprocessing() {
     setReadyLoading(true);setReadyError('');setReadyIds([]);
     axios.get(`${API}/preprocessing/ready-ids`, {signal:controller.signal, params:{
       search:searchQuery, ...(supplierId!=='all' && {supplier_id:supplierId}),
-      ...(statusFilter!=='all' && {status:statusFilter}), include_synced:statusFilter==='synced',
+      ...(statusFilter!=='all' && {status:statusFilter}), include_synced: true,
     }}).then(response=>{
       if(version!==readyVersion.current)return;
       const ids=response.data.product_ids || [];
@@ -369,7 +369,7 @@ export default function ProductPreprocessing() {
               </Select>
               <input aria-label="Search preprocessing products" placeholder="Search product name or SKU" value={search} disabled={syncing} onChange={event=>setSearch(event.target.value)} className="pp-search bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
               <Button disabled={loading || syncing || readyLoading || !!readyError || !readyIds.length} aria-label="Select eligible products matching these filters" variant="outline" size="sm" onClick={selectAllVisible}>
-                {statusFilter==='synced'?'Select synced':'Select ready'}
+                {statusFilter==='synced'?'Select synced':'Select all eligible'}
               </Button>
               <Button disabled={syncing || !selectedProducts.size} variant="outline" size="sm" onClick={deselectAll}>
                 Clear selection
