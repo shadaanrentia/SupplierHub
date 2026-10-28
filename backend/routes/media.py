@@ -79,11 +79,8 @@ def image_type(header, content):
 
 
 async def fetch_image(url):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 SupplierHub/1.0',
-        'Accept': 'image/*', 'Accept-Language': 'en-CA,en;q=0.9',
-        'Referer': 'https://' + validate_url(url) + '/',
-    }
+    # Use httpx defaults: the supplier rejected the previous custom header bundle.
+    validate_url(url)
     async with _slots:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -94,7 +91,7 @@ async def fetch_image(url):
                     current = url
                     for hop in range(5):
                         validate_url(current)
-                        async with client.stream('GET', current, headers=headers) as upstream:
+                        async with client.stream('GET', current) as upstream:
                             status = upstream.status_code
                             if status in (301, 302, 303, 307, 308):
                                 location = upstream.headers.get('location')
@@ -292,4 +289,5 @@ async def stored_export_images(product_id, images):
             f'{len(missing)} supplier images are not stored in SupplierHub; no Lightspeed image upload sent. '
             + (details + '; ' if details else '') + 'First source: ' + missing[0])
     return prepared
+
 

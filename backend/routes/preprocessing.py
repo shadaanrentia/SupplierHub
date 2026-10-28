@@ -93,7 +93,7 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
         destination_names={}
         if await conn.fetchval("SELECT to_regclass('public.lightspeed_category_snapshots')"):
             snapshot=await conn.fetchval("""SELECT categories FROM lightspeed_category_snapshots
-                WHERE store_domain=(SELECT BTRIM(lightspeed_store_id) FROM settings WHERE id='system_settings')""")
+                WHERE store_domain=(SELECT LOWER(BTRIM(lightspeed_store_id)) FROM settings WHERE id='system_settings')""")
             categories=json.loads(snapshot) if isinstance(snapshot,str) else (snapshot or [])
             by_id={str(c.get('lightspeed_category_id') or c.get('id')):c for c in categories}
             for cid,node in by_id.items():
@@ -394,5 +394,6 @@ async def preview_product_for_odoo(product_id: str, user: dict = Depends(get_cur
         }
         preview['validation']={'is_valid':readiness['is_valid'],'errors':readiness['validation_errors']}
         return preview
+
 
 
