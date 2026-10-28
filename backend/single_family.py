@@ -341,6 +341,11 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
             if isinstance(parts, str): parts = json.loads(parts)
             return not parts and not str(i.get('source_color') or i.get('color') or '').strip()
         images = [i for i in images if general(i) or any(matched_images(v, [i]) for v in variants)]
+    from routes.media import stored_export_images
+    if images:
+        if not row:
+            raise ValueError('Cannot resolve source product for stored image export')
+        images = await stored_export_images(row['product_id'], images)
     family = remote_snapshot or await asyncio.to_thread(ls.remote_family, destination)
     remote = members(family, expected_skus=[sku(v) for v in variants or []])
     ls._repair_digest_cache = {}
@@ -384,3 +389,4 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
     if totals['failed'] or totals['uncertain']:
         totals['messages'].append('Images pending; retry Sync Selected to reconcile without recreating variants')
     return totals
+

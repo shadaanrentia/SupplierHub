@@ -161,6 +161,26 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 family = await asyncio.to_thread(ls.update_family_metadata,destination,name,category_id,brand,product.get('description'))
                 await ls._sync_existing_variants(destination,batch,0,name,supplier,True,markup,remote_snapshot=family)
                 await conn.execute("UPDATE lightspeed_export_groups SET state='images_pending',message='Variants, prices and inventory confirmed; syncing images',updated_at=NOW() WHERE id=$1",group['id'])
+                # Channel activation is per sellable variant, not just the first family member.
+                activation_slots = asyncio.Semaphore(6)
+                async def activate_member(member):
+                    async with activation_slots:
+                        active = member.get('active')
+                        if isinstance(active, dict) and active.get('in_store') is True and active.get('ecwid') is True:
+                            return
+                        member_id = str(member['id'])
+                        if not await asyncio.to_thread(ls._activate_online_store_product, member_id):
+                            raise ValueError('POS/eCommerce activation failed for variant ' + str(member.get('sku') or member_id))
+                        response = await asyncio.to_thread(ls.family_request, 'GET', 'products/' + member_id)
+                        row = response.get('data') or {}
+                        confirmed_active = row.get('active') or {}
+                        if not isinstance(confirmed_active, dict) or confirmed_active.get('in_store') is not True or confirmed_active.get('ecwid') is not True:
+                            raise ValueError('POS/eCommerce activation not confirmed for variant ' + str(member.get('sku') or member_id))
+                activation_results = await asyncio.gather(
+                    *(activate_member(member) for member in members(family).values()), return_exceptions=True)
+                activation_errors = [str(item) for item in activation_results if isinstance(item, Exception)]
+                if activation_errors:
+                    raise ValueError('; '.join(activation_errors[:5]))
                 completed.append(destination)
                 result = await repair_assets(ls,destination,images,variants=batch,remote_snapshot=family)
                 pending = result['failed'] or result['uncertain']
@@ -174,3 +194,4 @@ async def export_families(ls, product, variants, images, markup, category_id):
             return {'success':False,'error':str(exc),'completed_groups':completed}
         finally:
             await conn.execute('SELECT pg_advisory_unlock(hashtext($1))',lock)
+

@@ -2109,21 +2109,47 @@ class LightspeedService:
         return self._family_deleted(str(family['id']))
 
     def update_family_metadata(self, product_id, name, category_id=None, brand_id=None, description=None):
+        """Write only changed fields; reconcile a failed PATCH before retrying."""
         family = self.remote_family(product_id)
-        common = {'name': name, 'track_inventory': True}
-        if description: common['description'] = description_html(description)
-        if category_id: common['category_id'] = str(category_id)
-        if brand_id: common['brand_id'] = str(brand_id)
-        self.family_request('PATCH', f"product_families/{family['id']}", common)
+        wanted = {'name': name, 'track_inventory': True}
+        if description: wanted['description'] = description_html(description)
+        if category_id: wanted['category_id'] = str(category_id)
+        if brand_id: wanted['brand_id'] = str(brand_id)
+
+        def matches(row, field, value):
+            if field == 'description':
+                return description_text(row.get(field)) == description_text(value)
+            if field in ('category_id', 'brand_id'):
+                return str(row.get(field) or '') == str(value)
+            if field == 'track_inventory':
+                return row.get(field) is value
+            return row.get(field) == value
+
+        changes = {k: v for k, v in wanted.items() if not matches(family, k, v)}
+        if not changes:
+            logger.info('Family metadata already confirmed for %s; skipping PATCH', product_id)
+            return family
+        try:
+            self.family_request('PATCH', f"product_families/{family['id']}", changes)
+        except requests.RequestException as exc:
+            # A server error may follow a committed write. Never assume either outcome.
+            try:
+                confirmed = self.remote_family(product_id)
+            except Exception:
+                raise exc
+            missing = [k for k, v in wanted.items() if not matches(confirmed, k, v)]
+            if missing:
+                raise ValueError(
+                    'Family metadata update failed; unconfirmed fields: '
+                    + ', '.join(missing) + '; destination retained: '
+                    + str(product_id) + '; ' + str(exc)
+                ) from exc
+            logger.warning('Family PATCH errored but readback confirmed all requested fields for %s', product_id)
+            return confirmed
         confirmed = self.remote_family(product_id)
-        if confirmed.get('name') != name or confirmed.get('track_inventory') is not True:
-            raise ValueError('Family name/inventory tracking update was not confirmed')
-        if category_id and str(confirmed.get('category_id') or '') != str(category_id):
-            raise ValueError('Family category update was not confirmed')
-        if brand_id and str(confirmed.get('brand_id') or '') != str(brand_id):
-            raise ValueError('Family brand update was not confirmed')
-        if description and description_text(confirmed.get('description')) != description_text(description):
-            raise ValueError('Family description update was not confirmed; inspect destination metadata')
+        missing = [k for k, v in wanted.items() if not matches(confirmed, k, v)]
+        if missing:
+            raise ValueError('Family metadata readback did not confirm: ' + ', '.join(missing))
         return confirmed
 
     def remote_family(self, product_id):
@@ -2576,3 +2602,4 @@ class LightspeedService:
                 exc_info=True
             )
             return False
+

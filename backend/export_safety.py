@@ -216,6 +216,8 @@ async def export_product(ls, product, variants, images, markup, category_id):
     await ensure_pricing_schema()
     from export_format import assert_service_compatible
     assert_service_compatible(ls)
+    from routes.media import stored_export_images
+    images = await stored_export_images(product['id'], images)
     active = [dict(v) for v in variants if v.get('is_active') is not False]
     eligible = eligible_variants(active)
     async with deps.pool.acquire() as conn:
@@ -231,3 +233,4 @@ async def export_product(ls, product, variants, images, markup, category_id):
             return await _legacy_export_product(ls, product, variants, images, markup, category_id)
         finally:
             await conn.execute('SELECT pg_advisory_unlock(hashtext($1))', lock)
+
