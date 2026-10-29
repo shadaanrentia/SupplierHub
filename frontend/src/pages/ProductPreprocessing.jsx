@@ -39,7 +39,6 @@ export default function ProductPreprocessing() {
   const [readyIds, setReadyIds] = useState([]);
   const [readyLoading, setReadyLoading] = useState(true);
   const [readyError, setReadyError] = useState('');
-  const readyVersion = useRef(0);
   const [previewProduct, setPreviewProduct] = useState(null);
   const [showPreview, setShowPreview] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -60,6 +59,7 @@ export default function ProductPreprocessing() {
     const version=++requestVersion.current;
     setLoading(true);
     setLoadError('');
+    setReadyLoading(true);setReadyError('');setReadyIds([]);
     try {
       const params = new URLSearchParams({ page, limit, search: searchQuery });
       if(supplierId!=='all') params.append('supplier_id',supplierId);
@@ -69,33 +69,19 @@ export default function ProductPreprocessing() {
       const res = await axios.get(`${API}/preprocessing/products?${params}`);
       if(version!==requestVersion.current) return;
       setProducts(res.data.products || []);
+      const eligibleIds=res.data.selectable_ids || [];
+      setReadyIds(eligibleIds);
+      const eligibleSet=new Set(eligibleIds);
+      setSelectedProducts(current=>new Set([...current].filter(id=>eligibleSet.has(id))));
       setSelectedProducts(current=>new Set([...current].filter(id=>!(res.data.products || []).some(p=>p.id===id && !p.can_sync && !p.can_update))));
       setTotal(res.data.total || 0);
     } catch (e) {
-      if(version===requestVersion.current) setLoadError(typeof e.response?.data?.detail==='string'?e.response.data.detail:'Could not load products. Try again.');
+      if(version===requestVersion.current) {setLoadError(typeof e.response?.data?.detail==='string'?e.response.data.detail:'Could not load products. Try again.');setReadyError('Could not load eligible products. Refresh to retry.');}
     } finally {
-      if(version===requestVersion.current) setLoading(false);
+      if(version===requestVersion.current) {setLoading(false);setReadyLoading(false);}
     }
   }, [page, statusFilter, searchQuery,supplierId]);
 
-  useEffect(() => {
-    const version=++readyVersion.current;
-    const controller=new AbortController();
-    setReadyLoading(true);setReadyError('');setReadyIds([]);
-    axios.get(`${API}/preprocessing/ready-ids`, {signal:controller.signal, params:{
-      search:searchQuery, ...(supplierId!=='all' && {supplier_id:supplierId}),
-      ...(statusFilter!=='all' && {status:statusFilter}), include_synced: true,
-    }}).then(response=>{
-      if(version!==readyVersion.current)return;
-      const ids=response.data.product_ids || [];
-      setReadyIds(ids);
-      const selectable=response.data.selectable_ids || ids;
-      setSelectedProducts(current=>new Set([...current].filter(id=>selectable.includes(id))));
-    }).catch(error=>{
-      if(version===readyVersion.current && !controller.signal.aborted)setReadyError('Could not load ready products. Refresh to retry.');
-    }).finally(()=>{if(version===readyVersion.current && !controller.signal.aborted)setReadyLoading(false);});
-    return()=>{controller.abort();readyVersion.current+=1;};
-  }, [searchQuery,statusFilter,supplierId,products]);
   const readySelectedCount=readyIds.filter(id=>selectedProducts.has(id)).length;
   const allReadySelected=readyIds.length>0 && readySelectedCount===readyIds.length;
   const toggleAllReady=checked=>setSelectedProducts(checked ? new Set(readyIds) : new Set());
@@ -110,10 +96,8 @@ export default function ProductPreprocessing() {
     }
   }, [supplierId]);
 
-  useEffect(() => {
-    fetchProducts();
-    fetchSummary();
-  }, [fetchProducts, fetchSummary]);
+  useEffect(() => {fetchProducts();}, [fetchProducts]);
+  useEffect(() => {fetchSummary();}, [fetchSummary]);
 
   const recalculatePrices = async () => {
     setLoading(true);
@@ -682,5 +666,6 @@ export default function ProductPreprocessing() {
     </div>
   );
 }
+
 
 

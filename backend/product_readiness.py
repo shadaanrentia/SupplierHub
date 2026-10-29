@@ -65,7 +65,7 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
             'previous_export_failed': product.get('lightspeed_sync_status') == 'failed'}
 
 
-async def load_readiness(conn, products):
+async def load_readiness(conn, products, include_assets=True):
     """Batch child/taxonomy reads, avoiding one database round trip per product."""
     if not products: return {}
     ids = [p['id'] for p in products]
@@ -73,8 +73,10 @@ async def load_readiness(conn, products):
     settings = await conn.fetchrow("SELECT lightspeed_store_id FROM settings WHERE id='system_settings'")
     domain = str(settings['lightspeed_store_id'] or '').strip() if settings else ''
     variants, images, groups = defaultdict(list), defaultdict(list), defaultdict(list)
-    for r in await conn.fetch('SELECT * FROM product_variants WHERE product_id=ANY($1::varchar[]) AND is_active IS DISTINCT FROM FALSE', ids): variants[r['product_id']].append(dict(r))
-    for r in await conn.fetch("SELECT * FROM product_media WHERE product_id=ANY($1::varchar[]) AND media_type='image' ORDER BY is_primary DESC,created_at", ids): images[r['product_id']].append(dict(r))
+    variant_columns = '*' if include_assets else 'id,product_id,variant_sku,color,size,price,inventory,is_active,price_needs_review'
+    image_columns = '*' if include_assets else 'id,product_id,url,media_type,is_primary,created_at'
+    for r in await conn.fetch(f'SELECT {variant_columns} FROM product_variants WHERE product_id=ANY($1::varchar[]) AND is_active IS DISTINCT FROM FALSE', ids): variants[r['product_id']].append(dict(r))
+    for r in await conn.fetch(f"SELECT {image_columns} FROM product_media WHERE product_id=ANY($1::varchar[]) AND media_type='image' ORDER BY is_primary DESC,created_at", ids): images[r['product_id']].append(dict(r))
     for r in await conn.fetch('SELECT * FROM lightspeed_export_groups WHERE product_id=ANY($1::varchar[]) AND store_domain=$2 ORDER BY group_number', ids, domain): groups[r['product_id']].append(dict(r))
     managed = {r['supplier_id'] for r in await conn.fetch('SELECT supplier_id FROM supplier_taxonomy_imports WHERE supplier_id=ANY($1::varchar[])', supplier_ids)}
     styles = {(r['supplier_id'], r['sku_key']): decoded(r['data']) for r in await conn.fetch('SELECT supplier_id,sku_key,data FROM supplier_taxonomy_styles WHERE supplier_id=ANY($1::varchar[])', supplier_ids)}
@@ -126,3 +128,4 @@ async def load_readiness(conn, products):
 
 def public_state(state):
     return {k: v for k, v in state.items() if k not in ('variants', 'images')}
+

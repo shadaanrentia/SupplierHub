@@ -79,11 +79,8 @@ def image_type(header, content):
 
 
 async def fetch_image(url):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 SupplierHub/1.0',
-        'Accept': 'image/*', 'Accept-Language': 'en-CA,en;q=0.9',
-        'Referer': 'https://' + validate_url(url) + '/',
-    }
+    # Use httpx defaults: the supplier rejected the previous custom header bundle.
+    validate_url(url)
     async with _slots:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -94,7 +91,7 @@ async def fetch_image(url):
                     current = url
                     for hop in range(5):
                         validate_url(current)
-                        async with client.stream('GET', current, headers=headers) as upstream:
+                        async with client.stream('GET', current) as upstream:
                             status = upstream.status_code
                             if status in (301, 302, 303, 307, 308):
                                 location = upstream.headers.get('location')
@@ -154,7 +151,7 @@ async def media_proxy(url: str):
 
 
 
-async def cache_product_images(product_id):
+async def cache_product_images(product_id, media_id=None):
     """Persist validated supplier bytes using the existing image_base64 column.
 
     Never hold a database connection while downloading. Existing copies are retained
@@ -166,7 +163,8 @@ async def cache_product_images(product_id):
         rows = await conn.fetch("""SELECT id,url,
             COALESCE(image_base64,'')<>'' AS stored
             FROM product_media WHERE product_id=$1 AND media_type='image'
-            ORDER BY is_primary DESC,created_at""", product_id)
+            AND ($2::text IS NULL OR id=$2)
+            ORDER BY is_primary DESC,created_at""", product_id, media_id)
 
     async def save(row):
         if row['stored']:
@@ -201,15 +199,23 @@ async def cache_product_images(product_id):
 
 @router.get('/media/{media_id}/content')
 async def stored_image(media_id: str):
-    """Serve database copies only. This read never calls a supplier."""
+    """Backfill a missing copy once, then serve persisted supplier bytes."""
     import base64
     import binascii
     import hashlib
     import deps
     async with deps.pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT image_base64 FROM product_media WHERE id=$1 AND media_type='image'",media_id)
-    if not row or not row['image_base64']:
-        raise HTTPException(404,'Image is not stored yet; run supplier Media sync')
+        row = await conn.fetchrow("SELECT product_id,image_base64 FROM product_media WHERE id=$1 AND media_type='image'",media_id)
+    if not row:
+        raise HTTPException(404,'Image record not found')
+    if not row['image_base64']:
+        outcome = await cache_product_images(row['product_id'], media_id=media_id)
+        if outcome['failed']:
+            raise HTTPException(502, '; '.join(outcome['errors']) or 'Supplier image download failed')
+        async with deps.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT image_base64 FROM product_media WHERE id=$1 AND media_type='image'",media_id)
+        if not row or not row['image_base64']:
+            raise HTTPException(409,'Image changed while saving; reload the product')
     try:
         encoded = str(row['image_base64'])
         header = ''
@@ -225,3 +231,63 @@ async def stored_image(media_id: str):
         'Cache-Control':'public, max-age=3600',
         'ETag':'"'+hashlib.sha256(content).hexdigest()+'"',
         'X-Content-Type-Options':'nosniff'})
+
+
+async def stored_export_images(product_id, images):
+    """Persist source records/links and bytes before any Lightspeed image write."""
+    import json
+    import deps
+    from deps import new_id
+    candidates = [dict(i) for i in images if i.get('media_type', 'image') == 'image']
+    async with deps.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute('SELECT pg_advisory_xact_lock(hashtext($1))', 'image-sources:' + str(product_id))
+            for image in candidates:
+                url = str(image.get('url') or '').strip()
+                if not url:
+                    continue
+                old = await conn.fetchrow(
+                    'SELECT id,source_part_ids FROM product_media WHERE product_id=$1 AND url=$2 ORDER BY created_at LIMIT 1',
+                    product_id,url)
+                parts = image.get('source_part_ids') or []
+                if isinstance(parts,str): parts=json.loads(parts)
+                if old:
+                    prior = old['source_part_ids'] or []
+                    if isinstance(prior,str): prior=json.loads(prior)
+                    parts = list(dict.fromkeys([str(p) for p in prior + list(parts)]))
+                    await conn.execute(
+                        "UPDATE product_media SET source_part_ids=$2::jsonb WHERE id=$1",
+                        old['id'],json.dumps(parts))
+                else:
+                    await conn.execute(
+                        """INSERT INTO product_media
+                        (id,product_id,media_type,url,description,is_primary,created_at,source_color,source_part_ids)
+                        VALUES($1,$2,'image',$3,$4,$5,NOW(),$6,$7::jsonb)""",
+                        new_id(),product_id,url,image.get('description') or '',
+                        bool(image.get('is_primary')),image.get('source_color') or image.get('color') or '',json.dumps(list(parts)))
+    outcome = await cache_product_images(product_id)
+    async with deps.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM product_media WHERE product_id=$1 AND media_type='image' ORDER BY is_primary DESC,created_at",
+            product_id)
+    by_url = {str(r['url'] or '').strip():dict(r) for r in rows}
+    prepared, missing = [], []
+    for image in candidates:
+        url = str(image.get('url') or '').strip()
+        stored = by_url.get(url)
+        if stored and stored.get('image_base64'):
+            prepared.append(dict(image, image_base64=stored['image_base64'],
+                                 id=stored['id']))
+        elif not url and image.get('image_base64'):
+            # Caller-provided bytes with no durable media identity are not export-ready.
+            missing.append('Image has no saved supplier URL/record')
+        else:
+            missing.append(url or 'Image source URL missing')
+    if missing:
+        details = '; '.join(outcome['errors'])
+        raise ValueError(
+            f'{len(missing)} supplier images are not stored in SupplierHub; no Lightspeed image upload sent. '
+            + (details + '; ' if details else '') + 'First source: ' + missing[0])
+    return prepared
+
+

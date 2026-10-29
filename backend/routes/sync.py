@@ -733,7 +733,12 @@ async def run_bulk(log_id,supplier_id,connector,event,cache_only=False):
                             await conn.execute("INSERT INTO product_media(id,product_id,media_type,url,description,is_primary,created_at) VALUES($1,$2,'image',$3,'BulkData variant image',TRUE,NOW())",new_id(),product_id,url)
                         await conn.execute("UPDATE product_media SET source_color=$3,source_part_ids=$4::jsonb WHERE product_id=$1 AND url=$2",product_id,url,colour,json.dumps(sorted(image['parts'])))
                     await conn.execute("UPDATE products SET price_needs_review=FALSE WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM product_variants WHERE product_id=$1 AND is_active IS DISTINCT FROM FALSE AND (price IS NULL OR price<=0))",product_id)
-            status,code,message='succeeded','',f'BulkData description, metadata and {len(images)} verified image URLs imported; images upload during Lightspeed sync.'
+            from routes.media import cache_product_images
+            cached_images = await cache_product_images(product_id)
+            status,code,message='succeeded','',f"BulkData saved; images: {cached_images['downloaded']} downloaded, {cached_images['cached']} already saved, {cached_images['failed']} failed"
+            if cached_images['failed']:
+                status,code='failed','IMAGE_DOWNLOAD_FAILED'
+                message += '; ' + '; '.join(cached_images['errors'])
             if any(not positive(v.get('price')) or not valid_quantity(v.get('inventory')) for v in product['variants']):
                 status,code,message='failed','INVALID_DATA','BulkData saved; missing/invalid prices or inventory retained for review. Existing valid values preserved.'
         except StopRequested:raise
@@ -855,6 +860,3 @@ async def odoo_push_task(supplier_id: str, log_id: str):
     except Exception as e:
         logger.error("Odoo push task error: %s", e)
         await update_sync_log(log_id, 'failed', f'Error: {str(e)}')
-
-
-

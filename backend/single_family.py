@@ -249,6 +249,8 @@ class MemberImages:
     def remote_family_images(self, ignored):
         if self._snapshot_images is not None: return self._snapshot_images
         row = self.service.family_request('GET', 'products/' + self.target).get('data')
+        if not isinstance(row, dict) or str(row.get('id') or '') != self.target:
+            raise ValueError('Member image read returned the wrong product')
         if isinstance(row, dict) and 'images' in row and row['images'] is None: return []
         if not isinstance(row, dict) or not isinstance(row.get('images'), list):
             raise ValueError('Member image collection is unavailable')
@@ -259,7 +261,7 @@ class MemberImages:
         assert_service_compatible(ls)
         self._snapshot_images = None
         ls._throttle()
-        response = requests.post(f'https://{ls.domain_prefix}.retail.lightspeed.app/api/2026-10/products/{self.target}/images',
+        response = ls._http_session().post(f'https://{ls.domain_prefix}.retail.lightspeed.app/api/2026-10/products/{self.target}/images',
             headers={k:v for k,v in ls._headers().items() if k.lower() != 'content-type'},
             files={'image': (filename, data, content_type)}, timeout=120)
         ls._handle_rate_limit(response)
@@ -286,15 +288,29 @@ def matched_images(variant, images):
         if isinstance(parts, str): parts = json.loads(parts)
         from media_links import usable
         parts = [p for p in parts if usable(p)]
-        color = str(image.get('source_color') or image.get('color') or '').strip().lower()
+        from media_links import colour_key
+        color = colour_key(image.get('source_color') or image.get('color'))
         # Explicit part links take precedence. Never guess colours from a filename.
         if not usable(color): color = ''
         if parts:
             match = sku(variant) in {str(p).strip().lower() for p in parts}
         else:
-            match = bool(color and color == str(variant.get('color') or '').strip().lower())
+            match = bool(color and color == colour_key(variant.get('color')))
         if match: matched.append(image)
     return matched
+
+
+def expand_colour_links(images, variants):
+    """Resolve supplier part links against this product, sharing colours across sizes."""
+    from media_links import resolved_links
+    result = []
+    for original in images:
+        image = dict(original)
+        color, parts, linked = resolved_links(image, variants)
+        if linked:
+            image.update(source_color=color, source_part_ids=parts)
+        result.append(image)
+    return result
 
 
 async def repair_assets(ls, destination, images, variants=None, remote_snapshot=None):
@@ -314,6 +330,9 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
             row = await conn.fetchrow('SELECT id AS product_id FROM products WHERE lightspeed_product_id=$1', destination)
         if variants is None and row:
             variants = [dict(v) for v in await conn.fetch('SELECT * FROM product_variants WHERE product_id=$1 AND is_active IS NOT FALSE', row['product_id'])]
+        # A split group may contain only XL while the supplier image references XS.
+        # Resolve links using the complete source product before selecting the group.
+        colour_variants = [dict(v) for v in await conn.fetch('SELECT variant_sku,color FROM product_variants WHERE product_id=$1', row['product_id'])] if row else list(variants or [])
     if variants:
         from sku_eligibility import eligible_variants
         variants = eligible_variants(variants)
@@ -336,11 +355,17 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
                 from media_links import usable
                 image['source_part_ids'] = list(dict.fromkeys([str(p) for p in parts if usable(p)] + [str(variant['variant_sku'])]))
         images = list(by_url.values()) + [dict(i) for i in images if not i.get('url')]
+        images = expand_colour_links(images, colour_variants)
         def general(i):
             parts = i.get('source_part_ids') or []
             if isinstance(parts, str): parts = json.loads(parts)
             return not parts and not str(i.get('source_color') or i.get('color') or '').strip()
         images = [i for i in images if general(i) or any(matched_images(v, [i]) for v in variants)]
+    from routes.media import stored_export_images
+    if images:
+        if not row:
+            raise ValueError('Cannot resolve source product for stored image export')
+        images = await stored_export_images(row['product_id'], images)
     family = remote_snapshot or await asyncio.to_thread(ls.remote_family, destination)
     remote = members(family, expected_skus=[sku(v) for v in variants or []])
     ls._repair_digest_cache = {}
@@ -349,15 +374,21 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
         async with semaphore:
             from export_safety import image_key
             key = image_key(image)
-            try: cached[key] = dict(image, image_base64=base64.b64encode(await retry_read(read_bytes, image)).decode())
-            except Exception: cached[key] = image
+            try:
+                import hashlib
+                data=await retry_read(read_bytes,image)
+                normalized=dict(image,image_base64=base64.b64encode(data).decode())
+                # Hash/decode each source once, shared by every size using the image.
+                normalized.update(_image_bytes=data,_source_sha256=hashlib.sha256(data).hexdigest(),
+                                  _source_image_key=image_key(normalized))
+                cached[key]=normalized
+            except Exception: cached[key]=image
     await asyncio.gather(*(prepare(i) for i in images if i.get('media_type', 'image') == 'image'))
     from export_safety import image_key
     totals = await sync_images(FamilyImages(ls, destination, family.get('images')), destination, [dict(cached.get(image_key(i), i), _source_image_key=image_key(i)) for i in images])
     if not variants: return totals
     if totals.get('_new_uncertain_write'):
-        totals['messages'].append('Variant image uploads paused until family image writes are reconciled')
-        return totals
+        totals['messages'].append('Family gallery has an unverified write; checking variant images independently without repeating that gallery upload')
     abort = asyncio.Event()
     async def repair_variant(variant):
         async with semaphore:
@@ -371,7 +402,9 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
             item = remote.get(sku(variant))
             if not item: raise ValueError('Missing destination member for image assignment: ' + sku(variant))
             target = str(item['id'])
-            outcome = await sync_images(MemberImages(ls, target, item.get('images')), 'variant:' + target, [cached.get(image_key(i), i) for i in selected])
+            # Always audit the member itself. Gallery membership and an old journal
+            # acknowledgement do not prove the variant still has its image.
+            outcome = await sync_images(MemberImages(ls, target), 'variant:' + target, [cached.get(image_key(i), i) for i in selected], audit_completed=True)
             if outcome.get('_fatal_local_error'): abort.set()
             return outcome
     outcomes = await asyncio.gather(*(repair_variant(v) for v in variants), return_exceptions=True)
@@ -384,3 +417,5 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
     if totals['failed'] or totals['uncertain']:
         totals['messages'].append('Images pending; retry Sync Selected to reconcile without recreating variants')
     return totals
+
+

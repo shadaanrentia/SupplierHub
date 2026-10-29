@@ -16,6 +16,8 @@ const words = value => String(value || '').replace(/_/g, ' ');
 function isAdmin() { try { return JSON.parse(localStorage.getItem('user') || '{}').role === 'admin'; } catch { return false; } }
 function issues(row) { return list(row.validation_errors).filter(Boolean); }
 function status(row) {
+  if (row.status === 'images_pending' || row.lightspeed_sync_status === 'images_pending') return {label:'Images pending',tone:'amber'};
+  if (row.status === 'synced' || row.lightspeed_sync_status === 'synced') return {label:'Synced',tone:'blue'};
   if (issues(row).length) return {label:'Needs review', tone:'amber'};
   if (row.previous_export_failed) return {label:'Retry needed', tone:'red'};
   return {label:'Ready', tone:'green'};
@@ -173,12 +175,29 @@ export default function ExportReview() {
   const repair=()=>perform('images',async id=>{
     await request(`${API}/products/${id}/repair-images`);await refreshDetail(id);refresh();toast.success('Image repair requested');
   });
+  const resolveImage=(image,resolution)=>perform('resolve',async id=>{
+    await request(`${API}/products/${id}/image-resolution`,{
+      destination_id:image.destination_id,image_key:image.image_key,resolution
+    });
+    await refreshDetail(id);refresh();
+    toast.success(resolution==='present'?'Image recorded as manually verified present':'Missing image marked for retry');
+  });
+  const downloadImageDiagnostics=()=>perform('diagnostics',async id=>{
+    const {data}=await axios.get(`${API}/products/${id}/destination-images`);
+    const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
+    const link=document.createElement('a');
+    link.href=url;link.download=`image-diagnostics-${id}.json`;
+    document.body.appendChild(link);link.click();link.remove();
+    window.setTimeout(()=>URL.revokeObjectURL(url),1000);
+    toast.success('Image diagnostics downloaded');
+  });
   const reset=()=>perform('reset',async id=>{
     await request(`${API}/products/${id}/reset-deleted-plan`);
     if(selectedRef.current===id){setPreview(null);setConfirmReset(false);}
     await refreshDetail(id);refresh();toast.success('Destination verification finished');
   });
-  const headerStatus=errors.length ? {label:'Needs review',tone:'amber'} : readiness.previous_export_failed ? {label:'Retry needed',tone:'red'} : readiness.is_valid ? {label:'Ready',tone:'green'} : {label:'Review',tone:'neutral'};
+  const imagesPending=readiness.status==='images_pending'||product.lightspeed_sync_status==='images_pending';
+  const headerStatus=running?{label:'Running',tone:'blue'}:status({...product,...readiness});
 
   return <div className="p-4 md:p-6 space-y-5 min-w-0 text-zinc-100">
     <div className="flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-2xl font-semibold tracking-tight">Export Review</h1><p className="text-sm text-zinc-500 mt-1">Resolve issues and prepare size groups.</p></div><a href="/preprocessing" className={btn}>Pre-processing<ArrowRight size={15}/></a></div>
@@ -210,8 +229,13 @@ export default function ExportReview() {
           {detail&&running&&<div role="status" className="rounded-lg border border-blue-900 bg-blue-950/20 p-3 flex items-center gap-2 text-sm text-blue-300"><RefreshCw size={15} className="animate-spin"/>Job running. Results update automatically.</div>}
           {detail&&tab==='overview'&&<>
             <div className="grid grid-cols-3 gap-2 sm:gap-3"><Metric icon={Package} label="Variants" value={detail.variant_count}/><Metric icon={Image} label="Source images" value={detail.images}/><Metric icon={Layers} label="Size groups" value={groups.length}/></div>
-            {errors.length ? <div className="rounded-lg border border-amber-900/60 bg-amber-950/10"><div className="px-4 py-3 border-b border-amber-900/40 flex items-center gap-2 text-sm font-medium text-amber-300"><AlertTriangle size={16}/>Needs attention<Badge tone="amber">{errors.length}</Badge></div><ul className="divide-y divide-zinc-800">{errors.map((error,i)=><li key={`${i}-${error}`} className="px-4 py-3 text-sm text-zinc-300 break-words">{error}</li>)}</ul></div> : <div className={`rounded-lg border p-4 flex items-start gap-3 ${readiness.previous_export_failed?'border-amber-900 bg-amber-950/10':'border-emerald-900 bg-emerald-950/10'}`}>{readiness.previous_export_failed?<AlertTriangle size={18} className="text-amber-400 shrink-0"/>:<CheckCircle2 size={18} className="text-emerald-400 shrink-0"/>}<div><p className="text-sm font-medium">{readiness.previous_export_failed?'Source checks passed. Previous export needs a retry.':readiness.is_valid?'Ready for Pre-processing':'Check the latest review results'}</p><p className="text-xs text-zinc-500 mt-1">{readiness.previous_export_failed?'Check Activity, then retry in Pre-processing.':'Sync products from Pre-processing.'}</p></div></div>}
-            <div><h3 className="text-sm font-medium mb-3">Quick actions</h3><div className="flex flex-wrap gap-2"><a href="/category-mapping" className={btn}>Category mapping<ExternalLink size={13}/></a><a href="/sync" className={btn}>Supplier sync<ExternalLink size={13}/></a><button className={btn} disabled={!admin||locked} onClick={refreshPricing}>{busy==='pricing'&&<RefreshCw size={14} className="animate-spin"/>}Refresh pricing</button><button className={btn} disabled={!admin||locked||!detail.images||!hasDestination} onClick={repair}>{busy==='images'&&<RefreshCw size={14} className="animate-spin"/>}Repair images</button></div></div>
+            {errors.length ? <div className="rounded-lg border border-amber-900/60 bg-amber-950/10"><div className="px-4 py-3 border-b border-amber-900/40 flex items-center gap-2 text-sm font-medium text-amber-300"><AlertTriangle size={16}/>Needs attention<Badge tone="amber">{errors.length}</Badge></div><ul className="divide-y divide-zinc-800">{errors.map((error,i)=><li key={`${i}-${error}`} className="px-4 py-3 text-sm text-zinc-300 break-words">{error}</li>)}</ul></div> : <div className={`rounded-lg border p-4 flex items-start gap-3 ${(readiness.previous_export_failed||imagesPending)?'border-amber-900 bg-amber-950/10':'border-emerald-900 bg-emerald-950/10'}`}>{(readiness.previous_export_failed||imagesPending)?<AlertTriangle size={18} className="text-amber-400 shrink-0"/>:<CheckCircle2 size={18} className="text-emerald-400 shrink-0"/>}<div><p className="text-sm font-medium">{imagesPending?'Images pending':readiness.previous_export_failed?'Source checks passed. Previous export needs a retry.':readiness.is_valid?'Ready for Pre-processing':'Check the latest review results'}</p><p className="text-xs text-zinc-500 mt-1">{imagesPending?'Some uploads are incomplete or unverified. Download image diagnostics to inspect the current associations.':readiness.previous_export_failed?'Check Activity, then retry in Pre-processing.':'Sync products from Pre-processing.'}</p></div></div>}
+            {list(detail.image_results).some(i=>i.status==='uncertain')&&<div className="rounded-lg border border-amber-900/60 p-4 space-y-3"><h3 className="text-sm font-medium text-amber-300">Verify previous image uploads</h3><p className="text-xs text-zinc-400">Check each source image in the matching Lightspeed product gallery, then record whether it is present. After all checks, use Repair images to refresh completion.</p>{list(detail.image_results).filter(i=>i.status==='uncertain').map(i=>{
+              const source=list(detail.source_images).find(x=>x.key===i.image_key);
+              const group=groups.find(g=>String(g.lightspeed_product_id)===String(i.destination_id));
+              return <div key={`${i.destination_id}-${i.image_key}`} className="border-t border-zinc-800 pt-3 space-y-2"><p className="text-xs text-zinc-400">{group?`Group ${group.group_number}`:'Product gallery'} · Destination {i.destination_id}</p>{source?.url?<a className="block text-xs text-blue-400 break-all" href={source.url} target="_blank" rel="noopener noreferrer">{source.url.split('/').pop()}<ExternalLink size={12} className="inline ml-1"/></a>:<p className="text-xs break-all">Source key: {i.image_key}</p>}<div className="flex flex-wrap gap-2"><button className={btn} disabled={!admin||locked||!source} onClick={()=>resolveImage(i,'present')}>I checked: image is present</button><button className={btn} disabled={!admin||locked||!source} onClick={()=>resolveImage(i,'absent')}>I checked: image is missing</button></div></div>;
+            })}</div>}
+            <div><h3 className="text-sm font-medium mb-3">Quick actions</h3><div className="flex flex-wrap gap-2"><a href="/category-mapping" className={btn}>Category mapping<ExternalLink size={13}/></a><a href="/sync" className={btn}>Supplier sync<ExternalLink size={13}/></a><button className={btn} disabled={!admin||locked} onClick={refreshPricing}>{busy==='pricing'&&<RefreshCw size={14} className="animate-spin"/>}Refresh pricing</button><button className={btn} disabled={!admin||locked||!detail.images||!hasDestination} onClick={repair}>{busy==='images'&&<RefreshCw size={14} className="animate-spin"/>}Repair images</button><button className={btn} disabled={!admin||locked||!hasDestination} onClick={downloadImageDiagnostics}>{busy==='diagnostics'&&<RefreshCw size={14} className="animate-spin"/>}Download image diagnostics</button></div></div>
             {Number(detail.variant_count)>200&&<button className="w-full rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 flex items-center justify-between gap-3 text-left hover:border-zinc-600" onClick={()=>setTab('groups')}><span className="flex items-center gap-3"><Layers size={19} className="text-blue-400"/><span><span className="block text-sm font-medium">Size groups</span><span className="block text-xs text-zinc-500 mt-1">{groups.length?`${groups.length} saved groups`:'Prepare groups of up to 200 variants'}</span></span></span><ChevronRight size={17}/></button>}
           </>}
           {detail&&tab==='groups'&&<>
@@ -229,3 +253,4 @@ export default function ExportReview() {
     </div>,document.body)}
   </div>;
 }
+

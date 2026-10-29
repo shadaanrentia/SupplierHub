@@ -2,6 +2,7 @@
 import asyncio
 import json
 import math
+import time
 import deps
 from size_order import sort_variants
 from single_family import members, sku, repair_assets, append_payload, attribute_order
@@ -32,6 +33,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
         except (TypeError,ValueError,OverflowError):
             raise ValueError('Missing or invalid variant inventory: '+sku(variant))
     key, domain = product['id'], ls.domain_prefix
+    started=time.perf_counter()
     completed, warnings = [], []
     async with deps.pool.acquire() as conn:
         lock = 'export-review:' + key
@@ -58,6 +60,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
             if not outlet: raise ValueError('Configure a Lightspeed inventory outlet')
             for group in groups:
                 current = group
+                group_started=time.perf_counter()
                 selected = {str(i) for i in decode(group['variant_ids'])}
                 batch = sort_variants([dict(v) for v in variants if str(v['id']) in selected])
                 if not 0 < len(batch) <= LIMIT: raise ValueError('Each family must contain 1–200 eligible variants')
@@ -158,15 +161,54 @@ async def export_families(ls, product, variants, images, markup, category_id):
                     family = await asyncio.to_thread(ls.remote_family,destination)
                     remote = members(family)
                 if set(remote) != {sku(v) for v in batch}: raise ValueError('Family variants do not exactly match the reviewed selection')
-                family = await asyncio.to_thread(ls.update_family_metadata,destination,name,category_id,brand,product.get('description'))
+                family = await asyncio.to_thread(ls.update_family_metadata,destination,name,category_id,brand,product.get('description'),remote_snapshot=family)
                 await ls._sync_existing_variants(destination,batch,0,name,supplier,True,markup,remote_snapshot=family)
                 await conn.execute("UPDATE lightspeed_export_groups SET state='images_pending',message='Variants, prices and inventory confirmed; syncing images',updated_at=NOW() WHERE id=$1",group['id'])
+                # Write channels per member, then verify the whole family once.
+                activation_slots = asyncio.Semaphore(6)
+                activation_members = [m for m in members(family).values()
+                    if not (isinstance(m.get('active'),dict) and m['active'].get('in_store') is True and m['active'].get('ecwid') is True)]
+                async def activate_member(member):
+                    async with activation_slots:
+                        if not await asyncio.to_thread(ls._activate_online_store_product,str(member['id'])):
+                            raise ValueError('POS/eCommerce activation failed for variant ' + str(member.get('sku') or member['id']))
+                activation_results = await asyncio.gather(
+                    *(activate_member(member) for member in activation_members),return_exceptions=True)
+                activation_errors=[str(e) for e in activation_results if isinstance(e,Exception)]
+                if activation_errors: raise ValueError('; '.join(activation_errors[:5]))
+                if activation_members:
+                    confirmed=await asyncio.to_thread(ls.remote_family,destination)
+                    confirmed_members=members(confirmed)
+                    if set(confirmed_members)!={sku(v) for v in batch}:
+                        raise ValueError('Family membership changed during channel verification')
+                    # Some API representations omit channel fields. Fetch only
+                    # those members rather than treating an omitted field as false.
+                    async def fill_missing_channels(member):
+                        active=member.get('active')
+                        if isinstance(active,dict) and 'in_store' in active and 'ecwid' in active: return
+                        async with activation_slots:
+                            response=await asyncio.to_thread(ls.family_request,'GET','products/'+str(member['id']))
+                        row=response.get('data') or {}
+                        if str(row.get('id') or '')!=str(member['id']):
+                            raise ValueError('Channel readback returned a different product')
+                        member['active']=row.get('active')
+                    await asyncio.gather(*(fill_missing_channels(m) for m in confirmed_members.values()))
+                    unconfirmed=[m.get('sku') for m in confirmed_members.values()
+                        if not (isinstance(m.get('active'),dict) and m['active'].get('in_store') is True and m['active'].get('ecwid') is True)]
+                    if unconfirmed: raise ValueError('POS/eCommerce activation not confirmed for: '+', '.join(str(s) for s in unconfirmed[:5]))
+                    family=confirmed
+                import logging
+                logging.getLogger(__name__).info('Export family %s: metadata, stock and channels took %.1fs; starting images',group['group_number'],time.perf_counter()-group_started)
                 completed.append(destination)
                 result = await repair_assets(ls,destination,images,variants=batch,remote_snapshot=family)
                 pending = result['failed'] or result['uncertain']
                 text = '; '.join(result['messages'])[:1500] if pending else 'Family, variant prices, inventory and images synchronized'
                 await conn.execute("UPDATE lightspeed_export_groups SET state=$2,message=$3,updated_at=NOW() WHERE id=$1",group['id'],'images_pending' if pending else 'done',text)
-                if pending: warnings.append(f"Family {group['group_number']}: {text}")
+                logging.getLogger(__name__).info('Export family %s finished in %.1fs; image uploads=%s, reused=%s, failed=%s, uncertain=%s',group['group_number'],time.perf_counter()-group_started,result['uploaded'],result['skipped'],result['failed'],result['uncertain'])
+                if pending:
+                    for detail in list(dict.fromkeys(result['messages']))[:12]:
+                        logging.getLogger(__name__).warning('Family %s image pending: %s',group['group_number'],detail)
+                    warnings.append(f"Family {group['group_number']}: {text}")
             return {'success':True,'lightspeed_id':completed[0],'destination_ids':completed,'image_warnings':warnings}
         except Exception as exc:
             if current:
@@ -174,3 +216,5 @@ async def export_families(ls, product, variants, images, markup, category_id):
             return {'success':False,'error':str(exc),'completed_groups':completed}
         finally:
             await conn.execute('SELECT pg_advisory_unlock(hashtext($1))',lock)
+
+

@@ -56,7 +56,7 @@ async def products(search: str='', oversized: bool=False, issues_only: bool=True
         state=states[product['id']]
         if state['excluded_from_queue']: continue
         if oversized and state['variants_count']<=LIMIT: continue
-        if issues_only and state['is_valid'] and not state['previous_export_failed']: continue
+        if issues_only and state['is_valid'] and not state['previous_export_failed'] and state.get('status') != 'images_pending': continue
         product.update(public_state(state))
         product['product_name']=export_name(product.get('product_name'),product.get('supplier_sku'))
         product.update(variant_count=state['variants_count'],image_count=state['images_count'])
@@ -113,7 +113,17 @@ async def destination_images(product_id: str, user=Depends(get_admin_user)):
         if not linked and not bulk_linked:
             source_link_issues.append({'sku':variant.get('variant_sku'), 'color':variant.get('color'), 'size':variant.get('size'),
                                        'bulk_record_sku':meta.get('product_id'), 'bulk_image_url':bulk_url})
-    return {'product_id':product_id,'read_only':True,'destinations':results,'source_link_issues':source_link_issues}
+    journal_destinations = {d['destination_id'] for d in destinations}
+    for result in results:
+        journal_destinations.update('variant:' + str(v['id']) for v in result.get('members', []) if v.get('id'))
+    async with deps.pool.acquire() as conn:
+        journals = await conn.fetch('SELECT destination_id,image_key,status,message,updated_at FROM lightspeed_export_image_results WHERE store_domain=$1 AND destination_id=ANY($2::text[]) ORDER BY destination_id,image_key', ls.domain_prefix, sorted(journal_destinations))
+    sources = [{**{k:i.get(k) for k in ('id','url','source_part_ids','source_color','color','media_type')}, 'image_key':image_key(i)} for i in source_images]
+    return {'product_id':product_id,'read_only':True,'destinations':results,'source_images':sources,
+            'image_journals':[dict(j) for j in journals],
+            'source_variants':[{'sku':v.get('variant_sku'),'color':v.get('color'),'size':v.get('size'),
+                                'matched_image_keys':[image_key(i) for i in matched_images(v,source_images)]} for v in variants],
+            'source_link_issues':source_link_issues}
 
 
 @router.post('/products/{product_id}/split-preview')
@@ -327,3 +337,4 @@ async def run_action(job_id,product_id,kind,ls):
         status,result='failed',{'success':False,'error':str(exc)[:1500]}
     async with deps.pool.acquire() as conn:
         await conn.execute('UPDATE lightspeed_review_jobs SET status=$2,result=$3::jsonb,updated_at=NOW() WHERE id=$1',job_id,status,json.dumps(result))
+

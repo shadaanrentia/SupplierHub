@@ -39,6 +39,7 @@ class LightspeedService:
         self.refresh_token = (refresh_token or '').strip()
         self.token_expires_at = token_expires_at
         self.token_was_refreshed = False
+        self._http_local = threading.local()
         self._last_request_time = 0
         self._variant_attr_cache = {}
         self._supplier_cache = {}
@@ -54,6 +55,7 @@ class LightspeedService:
         self._outlet_id_cache = None
         self._markup_cache = None
         self._variant_sync_semaphore = asyncio.Semaphore(5)
+        self._image_sync_slots = asyncio.Semaphore(5)
         self._throttle_lock = threading.Lock()
         self._image_executor = ThreadPoolExecutor(max_workers=5)
         has_oauth = bool(self.access_token and self.domain_prefix)
@@ -78,7 +80,7 @@ class LightspeedService:
             return
         logger.info("Lightspeed token expiring, refreshing...")
         try:
-            resp = requests.post(
+            resp = self._http_session().post(
                 f"https://{self.domain_prefix}.retail.lightspeed.app/api/1.0/token",
                 data={
                     'grant_type': 'refresh_token',
@@ -101,6 +103,16 @@ class LightspeedService:
             logger.error(f"Token refresh error: {e}")
 
     # ==================== HTTP HELPERS ====================
+    def _http_session(self):
+        """Reuse TCP/TLS connections per worker thread; never auto-retry writes."""
+        session = getattr(self._http_local, 'session', None)
+        if session is None:
+            session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=4, max_retries=0)
+            session.mount('https://', adapter)
+            self._http_local.session = session
+        return session
+
     def _base_url(self) -> str:
         return f"https://{self.domain_prefix}.retail.lightspeed.app/api/{API_VERSION}"
 
@@ -166,19 +178,19 @@ class LightspeedService:
 
     def _get(self, endpoint: str, params: dict = None) -> dict:
         self._throttle()
-        resp = requests.get(self._url(endpoint), headers=self._headers(), params=params, timeout=120)
+        resp = self._http_session().get(self._url(endpoint), headers=self._headers(), params=params, timeout=120)
         self._handle_rate_limit(resp)
         return self._handle_response(resp)
 
     def _post(self, endpoint: str, data: dict) -> dict:
         self._throttle()
-        resp = requests.post(self._url(endpoint), headers=self._headers(), json=data, timeout=120)
+        resp = self._http_session().post(self._url(endpoint), headers=self._headers(), json=data, timeout=120)
         self._handle_rate_limit(resp)
         return self._handle_response(resp)
 
     def _put(self, endpoint: str, data: dict) -> dict:
         self._throttle()
-        resp = requests.put(self._url(endpoint), headers=self._headers(), json=data, timeout=120)
+        resp = self._http_session().put(self._url(endpoint), headers=self._headers(), json=data, timeout=120)
         self._handle_rate_limit(resp)
         return self._handle_response(resp)
 
@@ -191,7 +203,7 @@ class LightspeedService:
             f"/api/2026-10/{endpoint.lstrip('/')}"
         )
 
-        resp = requests.patch(
+        resp = self._http_session().patch(
             url,
             headers=self._headers(),
             json=data,
@@ -203,7 +215,7 @@ class LightspeedService:
 
     def _delete(self, endpoint: str):
         self._throttle()
-        resp = requests.delete(self._url(endpoint), headers=self._headers(), timeout=120)
+        resp = self._http_session().delete(self._url(endpoint), headers=self._headers(), timeout=120)
         self._handle_rate_limit(resp)
         if resp.status_code not in (200, 204):
             return self._handle_response(resp)
@@ -231,7 +243,7 @@ class LightspeedService:
             )
         }
 
-        resp = requests.post(
+        resp = self._http_session().post(
             self._url(endpoint),
             headers=headers,
             files=files,
@@ -251,7 +263,7 @@ class LightspeedService:
             f"/api/2.1/{endpoint.lstrip('/')}"
         )
 
-        resp = requests.put(
+        resp = self._http_session().put(
             url,
             headers=self._headers(),
             json=data,
@@ -340,52 +352,64 @@ class LightspeedService:
 
     # ==================== CATEGORIES ====================
     def get_categories(self) -> dict:
-        """Read the documented cursor-paginated 2026-07 category response."""
+        """Read category rows and cursor metadata without guessing category names."""
         if self.mock_mode:
             return {'success': False, 'error': 'Lightspeed not configured', 'categories': []}
         try:
             result = []; after = None; seen_cursors = set(); seen_ids = set()
             while True:
-                params = {'page_size': 1000}
-                if after:
-                    params['after'] = after
+                params = {'page_size': 1000, 'include': 'family'}
+                if after: params['after'] = after
                 response = self._get('product_categories', params=params)
-                inner = response.get('data')
-                if isinstance(inner, list):
-                    cats = inner; page_info = response.get('page_info', {})
-                elif isinstance(inner, dict):
-                    nested = inner.get('data', inner)
-                    cats = nested.get('categories') if isinstance(nested, dict) else None
-                    page_info = response.get('page_info', inner.get('page_info', {}))
-                else:
-                    cats = None
+                if not isinstance(response, dict):
+                    raise ValueError('Category response must be an object')
+                if response.get('_lightspeed_validation_error'):
+                    raise ValueError('Lightspeed rejected the category request')
+                # API responses may place the list directly in data or within
+                # a data/categories envelope. Capture pagination at every envelope.
+                node = response
+                page_info = {}
+                cats = None
+                for depth in range(5):
+                    if isinstance(node, list):
+                        cats = node
+                        break
+                    if not isinstance(node, dict):
+                        break
+                    if isinstance(node.get('page_info'), dict):
+                        page_info = node['page_info']
+                    if isinstance(node.get('categories'), list):
+                        cats = node['categories']
+                        break
+                    node = node.get('data')
                 if not isinstance(cats, list):
-                    raise ValueError('Unexpected Lightspeed category response')
+                    raise ValueError('Unexpected category response envelope; top-level fields: '
+                                     + ', '.join(sorted(response.keys())))
                 for cat in cats:
-                    if not cat.get('id') or not cat.get('name'):
+                    if not isinstance(cat, dict) or not cat.get('id') or not cat.get('name'):
                         raise ValueError('Category response is missing id/name')
-                    if cat['id'] in seen_ids:
-                        continue
-                    seen_ids.add(cat['id'])
+                    cid = str(cat['id']).strip()
+                    if cid in seen_ids: continue
+                    seen_ids.add(cid)
                     result.append({
-                        'lightspeed_category_id': cat['id'], 'category_name': cat['name'],
+                        'lightspeed_category_id': cid, 'category_name': cat['name'],
                         'parent_id': cat.get('parent_category_id'),
                         'root_category_id': cat.get('root_category_id'),
                         'leaf_category': cat.get('leaf_category', False),
                         'category_path': cat.get('category_path', []), 'is_visible': True,
                     })
-                if not page_info.get('has_next'):
-                    break
+                if not page_info.get('has_next'): break
                 after = page_info.get('last_seen')
                 if not after or after in seen_cursors:
                     raise ValueError('Invalid/repeated Lightspeed category pagination cursor')
                 seen_cursors.add(after)
-            parents = {c['parent_id'] for c in result if c['parent_id']}
+            parents = {str(c['parent_id']) for c in result if c['parent_id']}
             for cat in result:
                 cat['leaf_category'] = cat['lightspeed_category_id'] not in parents
             return {'success': True, 'categories': result}
-        except Exception as e:
-            return {'success': False, 'error': str(e), 'categories': []}
+        except Exception as exc:
+            logger.warning('Lightspeed category read failed: %s', type(exc).__name__)
+            return {'success': False, 'error': str(exc), 'categories': []}
 
     def create_category(self, name: str, parent_id: str = None) -> dict:
         """Create one node with the documented bulk hierarchy endpoint."""
@@ -1409,7 +1433,7 @@ class LightspeedService:
     def _read_product_suppliers(self, product_id):
         """Read the documented 2.0 supplier links; omitted lists are not empty lists."""
         self._throttle()
-        response = requests.get(
+        response = self._http_session().get(
             f'https://{self.domain_prefix}.retail.lightspeed.app/api/2.0/products/{product_id}',
             headers=self._headers(), timeout=120
         )
@@ -2051,7 +2075,7 @@ class LightspeedService:
             try:
                 self._throttle()
                 logger.info('Lightspeed request: %s %s (attempt %s/%s)', method, resource, attempt + 1, attempts)
-                response = requests.request(method, url, headers=self._headers(), json=payload, timeout=120)
+                response = self._http_session().request(method, url, headers=self._headers(), json=payload, timeout=120)
                 self._handle_rate_limit(response)
                 if response.status_code >= 500:
                     raise requests.HTTPError(f'Lightspeed HTTP {response.status_code} during {method} {resource}', response=response)
@@ -2108,22 +2132,75 @@ class LightspeedService:
             raise ValueError('Member family changed during reconciliation; retry read later')
         return self._family_deleted(str(family['id']))
 
-    def update_family_metadata(self, product_id, name, category_id=None, brand_id=None, description=None):
-        family = self.remote_family(product_id)
-        common = {'name': name, 'track_inventory': True}
-        if description: common['description'] = description_html(description)
-        if category_id: common['category_id'] = str(category_id)
-        if brand_id: common['brand_id'] = str(brand_id)
-        self.family_request('PATCH', f"product_families/{family['id']}", common)
+    def update_family_metadata(self, product_id, name, category_id=None, brand_id=None, description=None, remote_snapshot=None):
+        """Write only changed fields; reconcile a failed PATCH before retrying."""
+        family = remote_snapshot or self.remote_family(product_id)
+        if family.get('track_inventory') is not True:
+            # This is a family-level flag. The documented legacy common update
+            # avoids the failing 2026-10 family PATCH seen for this store.
+            # Do not include inventory quantities, suppliers or other fields here.
+            original_family_id = str(family['id'])
+            logger.info('Enabling inventory tracking through legacy common update for %s', product_id)
+            write_error = None
+            try:
+                result = self._put_legacy_21(
+                    f'products/{product_id}', {'common': {'track_inventory': True}})
+                if not isinstance(result, dict) or result.get('_lightspeed_validation_error'):
+                    write_error = ValueError('Lightspeed rejected the inventory tracking update')
+            except requests.RequestException as exc:
+                # A transport failure can happen after a committed write.
+                write_error = exc
+            confirmed = self.remote_family(product_id)
+            if str(confirmed['id']) != original_family_id:
+                raise ValueError('Destination family changed during inventory tracking update; no stock writes sent')
+            if confirmed.get('track_inventory') is not True:
+                raise ValueError(
+                    'Inventory tracking is still unconfirmed after legacy common update; '
+                    'destination retained: ' + str(product_id)
+                    + ('; ' + str(write_error) if write_error else '')
+                ) from write_error
+            if write_error:
+                logger.warning('Inventory tracking write errored but remote readback confirmed it for %s', product_id)
+            family = confirmed
+        wanted = {'name': name, 'track_inventory': True}
+        if description: wanted['description'] = description_html(description)
+        if category_id: wanted['category_id'] = str(category_id)
+        if brand_id: wanted['brand_id'] = str(brand_id)
+
+        def matches(row, field, value):
+            if field == 'description':
+                return description_text(row.get(field)) == description_text(value)
+            if field in ('category_id', 'brand_id'):
+                return str(row.get(field) or '') == str(value)
+            if field == 'track_inventory':
+                return row.get(field) is value
+            return row.get(field) == value
+
+        changes = {k: v for k, v in wanted.items() if not matches(family, k, v)}
+        if not changes:
+            logger.info('Family metadata already confirmed for %s; skipping PATCH', product_id)
+            return family
+        try:
+            self.family_request('PATCH', f"product_families/{family['id']}", changes)
+        except requests.RequestException as exc:
+            # A server error may follow a committed write. Never assume either outcome.
+            try:
+                confirmed = self.remote_family(product_id)
+            except Exception:
+                raise exc
+            missing = [k for k, v in wanted.items() if not matches(confirmed, k, v)]
+            if missing:
+                raise ValueError(
+                    'Family metadata update failed; unconfirmed fields: '
+                    + ', '.join(missing) + '; destination retained: '
+                    + str(product_id) + '; ' + str(exc)
+                ) from exc
+            logger.warning('Family PATCH errored but readback confirmed all requested fields for %s', product_id)
+            return confirmed
         confirmed = self.remote_family(product_id)
-        if confirmed.get('name') != name or confirmed.get('track_inventory') is not True:
-            raise ValueError('Family name/inventory tracking update was not confirmed')
-        if category_id and str(confirmed.get('category_id') or '') != str(category_id):
-            raise ValueError('Family category update was not confirmed')
-        if brand_id and str(confirmed.get('brand_id') or '') != str(brand_id):
-            raise ValueError('Family brand update was not confirmed')
-        if description and description_text(confirmed.get('description')) != description_text(description):
-            raise ValueError('Family description update was not confirmed; inspect destination metadata')
+        missing = [k for k, v in wanted.items() if not matches(confirmed, k, v)]
+        if missing:
+            raise ValueError('Family metadata readback did not confirm: ' + ', '.join(missing))
         return confirmed
 
     def remote_family(self, product_id):
@@ -2154,7 +2231,7 @@ class LightspeedService:
         if isinstance(family.get('images'), list): return family['images']
         # A product-to-family response may omit the image collection.
         self._throttle()
-        response = requests.get(
+        response = self._http_session().get(
             f"https://{self.domain_prefix}.retail.lightspeed.app/api/2026-10/product_families/{family['id']}",
             headers=self._headers(), timeout=120)
         self._handle_rate_limit(response)
@@ -2172,7 +2249,7 @@ class LightspeedService:
         family_id = getattr(self, '_family_id_cache', {}).get(str(product_id))
         if not family_id: family_id = str(self.remote_family(product_id)['id'])
         self._throttle()
-        response = requests.post(
+        response = self._http_session().post(
             f"https://{self.domain_prefix}.retail.lightspeed.app/api/2026-10/product_families/{family_id}/images",
             headers={k:v for k,v in self._headers().items() if k.lower() != 'content-type'}, files={'image': (filename, image_bytes, content_type)}, timeout=120)
         self._handle_rate_limit(response)
@@ -2274,7 +2351,7 @@ class LightspeedService:
                 elif img_url:
 
                     try:
-                        resp = requests.get(
+                        resp = self._http_session().get(
                             img_url,
                             timeout=30,
                             headers={
@@ -2576,3 +2653,5 @@ class LightspeedService:
                 exc_info=True
             )
             return False
+
+

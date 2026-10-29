@@ -197,7 +197,9 @@ async def _refresh_category_snapshot():
             result = await asyncio.to_thread(ls.get_categories)
 
             if not isinstance(result, dict) or not result.get("success"):
-                raise ValueError("Lightspeed category request failed")
+                raise ValueError("Lightspeed category request failed: " + (
+                    str(result.get("error") or "No error detail returned")[:1000]
+                    if isinstance(result,dict) else "Invalid service response"))
 
             categories = result.get("categories")
             if not isinstance(categories, list):
@@ -238,7 +240,7 @@ async def _refresh_category_snapshot():
         except asyncio.CancelledError:
             raise
 
-        except Exception:
+        except Exception as exc:
             _category_logger.exception("Category refresh failed")
 
             async with deps.pool.acquire() as conn:
@@ -248,7 +250,7 @@ async def _refresh_category_snapshot():
                     VALUES ($1, $2)
                     ON CONFLICT (store_domain)
                     DO UPDATE SET last_error = EXCLUDED.last_error
-                """, store, "Refresh failed; previously saved categories retained.")
+                """, store, ("Refresh failed; saved categories retained. " + str(exc))[:1200])
 
 
 async def _category_refresh_loop():
@@ -305,7 +307,8 @@ async def get_lightspeed_categories(
         row = await conn.fetchrow("""
             SELECT categories, synced_at, last_error
             FROM lightspeed_category_snapshots
-            WHERE store_domain = $1
+            WHERE LOWER(BTRIM(store_domain)) = $1
+            ORDER BY synced_at DESC NULLS LAST LIMIT 1
         """, store)
 
     categories = row["categories"] if row else []
