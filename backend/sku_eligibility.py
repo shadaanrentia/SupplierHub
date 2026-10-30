@@ -8,10 +8,17 @@ def missing_price(value):
     except (ValueError, TypeError, OverflowError): return False
 
 
+
 def skip_sku(row):
-    try: zero_stock = row.get('inventory') is not None and float(row['inventory']) == 0
-    except (ValueError, TypeError, OverflowError): zero_stock = False
-    return missing_price(row.get('price')) and zero_stock
+    try:
+        zero_stock = (
+            row.get("inventory") is not None
+            and float(row["inventory"]) == 0
+        )
+    except (ValueError, TypeError, OverflowError):
+        zero_stock = False
+
+    return missing_price(row.get("price")) or zero_stock
 
 
 def eligible_variants(rows):
