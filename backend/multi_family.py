@@ -160,7 +160,25 @@ async def export_families(ls, product, variants, images, markup, category_id):
                     await asyncio.to_thread(ls.family_request,'POST',f"product_families/{family['id']}/products",[append_payload(v,order,markup,supplier,str(outlet)) for v in missing])
                     family = await asyncio.to_thread(ls.remote_family,destination)
                     remote = members(family)
-                if set(remote) != {sku(v) for v in batch}: raise ValueError('Family variants do not exactly match the reviewed selection')
+                # Only clear uncertain addition records after confirming the
+                # complete reviewed SKU set in the remote destination.
+                expected_skus = {sku(v) for v in batch}
+                if set(remote) != expected_skus:
+                    raise ValueError('Family variants do not exactly match the reviewed selection')
+
+                await conn.execute(
+                    """
+                    DELETE FROM lightspeed_family_additions
+                    WHERE product_id = $1
+                      AND store_domain = $2
+                      AND variant_sku = ANY($3::text[])
+                      AND state = 'adding'
+                    """,
+                    key,
+                    domain,
+                    sorted(expected_skus),
+                )
+
                 family = await asyncio.to_thread(ls.update_family_metadata,destination,name,category_id,brand,product.get('description'),remote_snapshot=family)
                 await ls._sync_existing_variants(destination,batch,0,name,supplier,True,markup,remote_snapshot=family)
                 await conn.execute("UPDATE lightspeed_export_groups SET state='images_pending',message='Variants, prices and inventory confirmed; syncing images',updated_at=NOW() WHERE id=$1",group['id'])

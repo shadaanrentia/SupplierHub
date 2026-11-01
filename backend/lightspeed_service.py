@@ -1490,40 +1490,107 @@ class LightspeedService:
         logger.info('Shipping measurements verified for variant %s: %s', product_id, desired)
         return True
 
-    async def _sync_single_variant(self, ls_variant_id: str, variant_sku: str, update_payload: dict, measurements=None, measurement_snapshot=None):
+
+    async def _verify_remote_inventory(self, product_id, outlet_id, expected_quantity):
+        """Read-only candidate verifier; response format is not production validated.
+
+        A missing or incomplete response must never be treated as verified.
+        This method is only called when the opt-in feature flag is enabled.
+        """
+        from lightspeed_inventory_adapter import normalize_inventory_levels
+        from inventory_verification import (
+            InventoryVerificationError,
+            verify_inventory_level,
+        )
+
+        response = await asyncio.to_thread(
+            self._get,
+            f"inventory_levels/{product_id}",
+        )
+        if not isinstance(response, dict) or response.get("_lightspeed_validation_error"):
+            raise InventoryVerificationError("Invalid inventory response")
+
+        pagination = response.get("pagination")
+        if not isinstance(pagination, dict):
+            raise InventoryVerificationError("Inventory pagination not verified")
+        if pagination.get("next") not in (None, ""):
+            raise InventoryVerificationError(
+                "Additional inventory pages require verification"
+            )
+
+        records = normalize_inventory_levels(response)
+        return verify_inventory_level(
+            records, product_id, outlet_id, expected_quantity
+        )
+
+    async def _sync_single_variant(
+        self,
+        ls_variant_id: str,
+        variant_sku: str,
+        update_payload: dict,
+        measurements=None,
+        measurement_snapshot=None,
+    ):
         async with self._variant_sync_semaphore:
             try:
                 result = await asyncio.to_thread(
                     self._put_legacy_21,
                     f"products/{ls_variant_id}",
-                    update_payload
+                    update_payload,
                 )
-                if (
-                    isinstance(result, dict)
-                    and result.get("_lightspeed_validation_error")
-                ):
-                    return {
-                        "success": False,
-                        "sku": variant_sku,
-                        "error": result
-                    }
+                if isinstance(result, dict) and result.get("_lightspeed_validation_error"):
+                    return {"success": False, "sku": variant_sku, "error": result}
+
+                # Temporary opt-in: the remote inventory API response envelope
+                # still needs validation in an isolated Lightspeed test store.
+                verify_enabled = (
+                    os.getenv("LIGHTSPEED_VERIFY_INVENTORY_READBACK", "0") == "1"
+                )
+
+                if verify_enabled:
+                    details = update_payload.get("details") if isinstance(update_payload, dict) else None
+                    if not isinstance(details, dict):
+                        raise ValueError("Cannot verify: missing variant details")
+                    inventory = details.get("inventory")
+                    if (
+                        not isinstance(inventory, list)
+                        or len(inventory) != 1
+                        or not isinstance(inventory[0], dict)
+                    ):
+                        raise ValueError("Cannot verify: expected one outlet inventory")
+                    expected = inventory[0]
+                    outlet_id = expected.get("outlet_id")
+                    if not outlet_id or "current_amount" not in expected:
+                        raise ValueError("Cannot verify: missing outlet or quantity")
+
+                    verified = await self._verify_remote_inventory(
+                        ls_variant_id, str(outlet_id), expected["current_amount"]
+                    )
+                    if verified is not True:
+                        raise ValueError("Inventory readback not confirmed")
+
                 if measurements:
-                    await asyncio.to_thread(self._sync_measurements, ls_variant_id, measurements, measurement_snapshot)
+                    await asyncio.to_thread(
+                        self._sync_measurements,
+                        ls_variant_id,
+                        measurements,
+                        measurement_snapshot,
+                    )
+
                 return {
                     "success": True,
                     "sku": variant_sku,
-                    "result": result
+                    "result": result,
+                    "inventory_verified": verify_enabled,
                 }
-            except Exception as e:
+            except Exception as exc:
                 logger.error(
-                    f"Variant update failed for {variant_sku}: {e}",
-                    exc_info=True
+                    "Variant update or verification failed for %s: %s",
+                    variant_sku,
+                    exc,
+                    exc_info=True,
                 )
-                return {
-                    "success": False,
-                    "sku": variant_sku,
-                    "error": str(e)
-                }
+                return {"success": False, "sku": variant_sku, "error": str(exc)}
 
     def _get_inventory_outlet_id(self):
         configured_id = os.getenv("LIGHTSPEED_OUTLET_ID", "").strip()

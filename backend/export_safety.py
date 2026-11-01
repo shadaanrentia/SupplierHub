@@ -218,13 +218,77 @@ async def export_product(ls, product, variants, images, markup, category_id):
     assert_service_compatible(ls)
     from routes.media import stored_export_images
     images = await stored_export_images(product['id'], images)
-    active = [dict(v) for v in variants if v.get('is_active') is not False]
+    active = [
+        dict(v) for v in variants
+        if v.get("is_active") is not False
+    ]
     eligible = eligible_variants(active)
+
     async with deps.pool.acquire() as conn:
-        groups = await conn.fetch('SELECT id FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2', product['id'], ls.domain_prefix)
-    if groups or len(eligible) > LIMIT:
+        groups = [
+            dict(row) for row in await conn.fetch(
+                """
+                SELECT id, variant_ids, lightspeed_product_id
+                FROM lightspeed_export_groups
+                WHERE product_id=$1 AND store_domain=$2
+                """,
+                product["id"],
+                ls.domain_prefix,
+            )
+        ]
+
+    if groups:
+        by_id = {str(v["id"]): v for v in active}
+        eligible_ids = {str(v["id"]) for v in eligible}
+
+        saved_ids = [
+            str(variant_id)
+            for group in groups
+            for variant_id in decode(group["variant_ids"])
+        ]
+
+        if len(saved_ids) != len(set(saved_ids)):
+            raise ValueError(
+                "Saved export plan contains duplicate variant IDs"
+            )
+
+        if set(saved_ids) != set(by_id):
+            raise ValueError(
+                "Saved export plan no longer matches active variants; "
+                "review the plan before synchronization"
+            )
+
+        # Zero-stock variants may be reconciled only within
+        # groups that already have a saved destination.
+        for group in groups:
+            group_ids = {
+                str(variant_id)
+                for variant_id in decode(group["variant_ids"])
+            }
+
+            if not group.get("lightspeed_product_id"):
+                if not group_ids.issubset(eligible_ids):
+                    raise ValueError(
+                        "Uncreated export group contains ineligible "
+                        "variants; review the split plan"
+                    )
+
+        selected = [
+            by_id[variant_id]
+            for variant_id in saved_ids
+        ]
+
         from multi_family import export_families
-        return await export_families(ls, product, eligible, images, markup, category_id)
+        return await export_families(
+            ls, product, selected, images, markup, category_id
+        )
+
+    if len(eligible) > LIMIT:
+        from multi_family import export_families
+        return await export_families(
+            ls, product, eligible, images, markup, category_id
+        )
+
     async with deps.pool.acquire() as conn:
         lock = 'export-review:' + str(product['id'])
         if not await conn.fetchval('SELECT pg_try_advisory_lock(hashtext($1))', lock):
