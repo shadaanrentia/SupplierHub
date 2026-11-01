@@ -2626,47 +2626,111 @@ class LightspeedService:
         }
 
     # ==================== INVENTORY ====================
-    def update_product_inventory(self, product_id: str, outlet_id: str, count: int):
+    
+    def update_product_inventory(
+        self,
+        product_id: str,
+        outlet_id: str,
+        count: int
+    ) -> dict:
+        """Update inventory only after strict input validation.
+
+        Reject invalid identifiers, negative quantities, booleans,
+        fractional quantities, and non-finite values.
+
+        Zero inventory is valid and must be synchronized.
+        """
+        from decimal import Decimal, InvalidOperation
+
         if self.mock_mode:
-            return {'success': False, 'error': 'Not configured'}
+            return {
+                "success": False,
+                "error": "Not configured",
+            }
+
         try:
-            self._put(
+            # Do not allow Boolean values to become 0 or 1.
+            if not isinstance(product_id, str) or not product_id.strip():
+                raise ValueError("Valid product_id is required")
+
+            if not isinstance(outlet_id, str) or not outlet_id.strip():
+                raise ValueError("Valid outlet_id is required")
+
+            product_id = product_id.strip()
+            outlet_id = outlet_id.strip()
+
+            if isinstance(count, bool) or count is None:
+                raise ValueError("Inventory quantity must be numeric")
+
+            # Decimal avoids silently truncating quantities.
+            try:
+                quantity = Decimal(str(count))
+            except (InvalidOperation, ValueError, TypeError):
+                raise ValueError("Invalid inventory quantity")
+
+            if not quantity.is_finite():
+                raise ValueError("Inventory quantity must be finite")
+
+            if quantity < 0:
+                raise ValueError("Inventory quantity cannot be negative")
+
+            if quantity != quantity.to_integral_value():
+                raise ValueError("Inventory quantity must be a whole number")
+
+            # Avoid unbounded integers reaching the remote API.
+            if quantity > Decimal("2147483647"):
+                raise ValueError("Inventory quantity exceeds allowed range")
+
+            safe_count = int(quantity)
+
+            # The only remote mutation in this method.
+            response = self._put(
                 f"products/{product_id}",
                 {
                     "has_inventory": True,
                     "inventory": [
                         {
                             "outlet_id": outlet_id,
-                            "count": int(count)
+                            "count": safe_count,
                         }
-                    ]
-                }
+                    ],
+                },
             )
+
+            if isinstance(response, dict) and (
+                response.get("success") is False
+                or response.get("_lightspeed_validation_error")
+            ):
+                raise ValueError(
+                    "Lightspeed rejected inventory update"
+                )
+
             logger.info(
-    "LIGHTSPEED OUTLETS: %s",
-    [
-        {
-            "id": o.get("id"),
-            "name": o.get("name")
-        }
-        for o in self._get_outlets()
-    ]
-)
+                "Inventory update request accepted: "
+                "product=%s outlet=%s count=%s",
+                product_id,
+                outlet_id,
+                safe_count,
+            )
+
             return {
-                'success': True,
-                'product_id': product_id,
-                'outlet_id': outlet_id,
-                'count': int(count)
+                "success": True,
+                "product_id": product_id,
+                "outlet_id": outlet_id,
+                "count": safe_count,
             }
-        except Exception as e:
+
+        except Exception as exc:
             logger.error(
-                f"Inventory update failed for "
-                f"{product_id}: {e}"
+                "Inventory update failed for product %s: %s",
+                product_id,
+                exc,
             )
             return {
-                'success': False,
-                'error': str(e)
+                "success": False,
+                "error": str(exc),
             }
+
 
     def _activate_online_store_product(self, product_id: str) -> bool:
         """
