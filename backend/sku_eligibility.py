@@ -1,25 +1,59 @@
-"""Temporary export eligibility; supplier records are never deleted."""
+
+"""
+SupplierHub 2.0 - SKU Export Eligibility
+
+Validates supplier price and inventory for new exports.
+
+Supplier records are never deleted by these functions.
+"""
+
 import math
 
 
 def missing_price(value):
-    if value is None or str(value).strip() in ('', '-', '—'): return True
-    try: return math.isfinite(float(value)) and float(value) == 0
-    except (ValueError, TypeError, OverflowError): return False
+    """Return True when the supplier price is unusable."""
+    if value is None:
+        return True
 
+    if isinstance(value, str):
+        value = value.strip()
+        if value in ("", "-", "—"):
+            return True
+
+    try:
+        price = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return True
+
+    return not math.isfinite(price) or price <= 0
+
+
+def invalid_inventory(value):
+    """Reject missing, malformed, non-finite or non-positive stock."""
+    if value is None:
+        return True
+
+    try:
+        inventory = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return True
+
+    return not math.isfinite(inventory) or inventory <= 0
 
 
 def skip_sku(row):
-    try:
-        zero_stock = (
-            row.get("inventory") is not None
-            and float(row["inventory"]) == 0
-        )
-    except (ValueError, TypeError, OverflowError):
-        zero_stock = False
-
-    return missing_price(row.get("price")) or zero_stock
+    """Skip a SKU when either price or stock is invalid."""
+    return (
+        missing_price(row.get("price"))
+        or invalid_inventory(row.get("inventory"))
+    )
 
 
 def eligible_variants(rows):
-    return [dict(row) for row in rows if row.get('is_active') is not False and not skip_sku(row)]
+    """Return active variants eligible for new export."""
+    return [
+        dict(row)
+        for row in rows
+        if row.get("is_active") is not False
+        and not skip_sku(row)
+    ]
