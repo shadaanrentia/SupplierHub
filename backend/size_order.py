@@ -33,3 +33,14 @@ def sort_variants(variants):
     return sorted(variants or [], key=lambda v: (
         size_key(v.get('size')), str(v.get('color') or '').casefold(),
         str(v.get('variant_sku') or '').casefold(), str(v.get('id') or '')))
+
+
+def sort_export_variants(variants):
+    """Group colours and order sizes naturally for new Lightspeed payloads.
+
+    Keep sort_variants unchanged: saved split planning groups whole sizes.
+    This does not reorder an existing remote family.
+    """
+    return sorted(variants or [], key=lambda v: (
+        str(v.get('color') or '').strip().casefold(), size_key(v.get('size')),
+        str(v.get('variant_sku') or '').casefold(), str(v.get('id') or '')))

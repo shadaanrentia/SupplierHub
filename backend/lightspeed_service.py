@@ -1423,7 +1423,14 @@ class LightspeedService:
             )
 
             if failed or not_found or skipped or not inventory_tracking_enabled or synced != len(supplier_variants):
-                raise ValueError(f"Incomplete variant sync: synced={synced}, missing={not_found}, failed={failed}, skipped={skipped}")
+                errors = []
+                for result in results:
+                    if isinstance(result, Exception):
+                        errors.append(str(result))
+                    elif not result.get('success'):
+                        errors.append(str(result.get('sku') or 'variant') + ': ' + str(result.get('error') or 'Unknown error'))
+                detail = '; '.join(errors[:3])
+                raise ValueError(f"Incomplete variant sync: synced={synced}, missing={not_found}, failed={failed}, skipped={skipped}" + ('; ' + detail if detail else ''))
 
         except Exception as e:
 
@@ -1643,7 +1650,8 @@ class LightspeedService:
     async def _create_product(self, product: dict, variants: list, cost_price: float, sale_price: float, supplier_id: str = None, brand_id: str = None) -> str:
         """Create a product, handling Lightspeed duplicate-product responses."""
         from inventory_selection import select_inventory
-        variants = select_inventory(variants)
+        from size_order import sort_export_variants
+        variants = sort_export_variants(select_inventory(variants))
         product_name = product.get("product_name", "")
         description = description_html(product.get("description", "") or "")
         sku = product.get("supplier_sku", "")

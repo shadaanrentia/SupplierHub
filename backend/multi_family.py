@@ -4,7 +4,7 @@ import json
 import math
 import time
 import deps
-from size_order import sort_variants
+from size_order import sort_variants, sort_export_variants
 from single_family import members, sku, repair_assets, append_payload, attribute_order
 
 
@@ -157,7 +157,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
                         for v in missing:
                             await conn.execute("INSERT INTO lightspeed_family_additions(product_id,store_domain,variant_sku,state) VALUES($1,$2,$3,'adding')",key,domain,sku(v))
                     order = attribute_order(family,attrs)
-                    await asyncio.to_thread(ls.family_request,'POST',f"product_families/{family['id']}/products",[append_payload(v,order,markup,supplier,str(outlet)) for v in missing])
+                    await asyncio.to_thread(ls.family_request,'POST',f"product_families/{family['id']}/products",[append_payload(v,order,markup,supplier,str(outlet)) for v in sort_export_variants(missing)])
                     family = await asyncio.to_thread(ls.remote_family,destination)
                     remote = members(family)
                 # Only clear uncertain addition records after confirming the

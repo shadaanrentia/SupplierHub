@@ -6,7 +6,7 @@ import logging
 import math
 import requests
 import deps
-from size_order import sort_variants
+from size_order import sort_variants, sort_export_variants
 from export_format import normalize_image_ack, assert_service_compatible
 
 log = logging.getLogger(__name__)
@@ -204,7 +204,7 @@ async def export_one_family(ls, product, variants, images, markup, category_id):
                     if journal and journal['state'] in ('adding', 'uncertain', 'done'):
                         raise ValueError('Addition outcome unknown for ' + variant_key + '; no duplicate POST sent')
                 if missing:
-                    bodies = [append_payload(v, order, markup, supplier_id, str(outlet)) for v in missing]
+                    bodies = [append_payload(v, order, markup, supplier_id, str(outlet)) for v in sort_export_variants(missing)]
                     for variant in missing:
                         await conn.execute("INSERT INTO lightspeed_family_additions(product_id,store_domain,variant_sku,state) VALUES($1,$2,$3,'adding') ON CONFLICT(product_id,store_domain,variant_sku) DO UPDATE SET state='adding',message='',updated_at=NOW()", key, domain, sku(variant))
                     try:
@@ -334,8 +334,9 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
         # Resolve links using the complete source product before selecting the group.
         colour_variants = [dict(v) for v in await conn.fetch('SELECT variant_sku,color FROM product_variants WHERE product_id=$1', row['product_id'])] if row else list(variants or [])
     if variants:
-        from sku_eligibility import eligible_variants
-        variants = eligible_variants(variants)
+        # Image repair targets existing members, independently of stock and price.
+        # Zero stock or missing price must not prevent an image being assigned.
+        variants = [dict(v) for v in variants if v.get('is_active') is not False]
     if variants:
         # Reconstruct exact links from already-imported BulkData rows. No supplier
         # request, filename inference or colour guessing is involved.
