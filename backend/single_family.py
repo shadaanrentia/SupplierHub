@@ -333,6 +333,7 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
         # A split group may contain only XL while the supplier image references XS.
         # Resolve links using the complete source product before selecting the group.
         colour_variants = [dict(v) for v in await conn.fetch('SELECT variant_sku,color FROM product_variants WHERE product_id=$1', row['product_id'])] if row else list(variants or [])
+        source_product = await conn.fetchrow('SELECT supplier_sku FROM products WHERE id=$1', row['product_id']) if row else None
     if variants:
         # Image repair targets existing members, independently of stock and price.
         # Zero stock or missing price must not prevent an image being assigned.
@@ -357,6 +358,8 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
                 image['source_part_ids'] = list(dict.fromkeys([str(p) for p in parts if usable(p)] + [str(variant['variant_sku'])]))
         images = list(by_url.values()) + [dict(i) for i in images if not i.get('url')]
         images = expand_colour_links(images, colour_variants)
+        from media_links import associate_sanmar_images
+        images = associate_sanmar_images(images, colour_variants, source_product['supplier_sku'] if source_product else '')
         def general(i):
             parts = i.get('source_part_ids') or []
             if isinstance(parts, str): parts = json.loads(parts)
@@ -418,5 +421,6 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
     if totals['failed'] or totals['uncertain']:
         totals['messages'].append('Images pending; retry Sync Selected to reconcile without recreating variants')
     return totals
+
 
 

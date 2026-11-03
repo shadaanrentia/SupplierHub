@@ -101,7 +101,9 @@ async def destination_images(product_id: str, user=Depends(get_admin_user)):
                                 members=[{'id':v.get('id'),'sku':v.get('sku'),'images':v.get('images')} for v in family['products']]))
         except Exception as exc:
             results.append(dict(destination, error=str(exc)))
-    from single_family import matched_images, sku
+    from single_family import matched_images, sku, expand_colour_links
+    from media_links import associate_sanmar_images
+    source_images = associate_sanmar_images(expand_colour_links(source_images, variants), variants, product.get('supplier_sku'))
     source_link_issues = []
     for variant in variants:
         meta = variant.get('bulk_metadata') or {}
@@ -118,7 +120,7 @@ async def destination_images(product_id: str, user=Depends(get_admin_user)):
         journal_destinations.update('variant:' + str(v['id']) for v in result.get('members', []) if v.get('id'))
     async with deps.pool.acquire() as conn:
         journals = await conn.fetch('SELECT destination_id,image_key,status,message,updated_at FROM lightspeed_export_image_results WHERE store_domain=$1 AND destination_id=ANY($2::text[]) ORDER BY destination_id,image_key', ls.domain_prefix, sorted(journal_destinations))
-    sources = [{**{k:i.get(k) for k in ('id','url','source_part_ids','source_color','color','media_type')}, 'image_key':image_key(i)} for i in source_images]
+    sources = [{**{k:i.get(k) for k in ('id','url','source_part_ids','source_color','color','media_type','association_source')}, 'image_key':image_key(i)} for i in source_images]
     return {'product_id':product_id,'read_only':True,'destinations':results,'source_images':sources,
             'image_journals':[dict(j) for j in journals],
             'source_variants':[{'sku':v.get('variant_sku'),'color':v.get('color'),'size':v.get('size'),
@@ -337,4 +339,5 @@ async def run_action(job_id,product_id,kind,ls):
         status,result='failed',{'success':False,'error':str(exc)[:1500]}
     async with deps.pool.acquire() as conn:
         await conn.execute('UPDATE lightspeed_review_jobs SET status=$2,result=$3::jsonb,updated_at=NOW() WHERE id=$1',job_id,status,json.dumps(result))
+
 

@@ -1507,7 +1507,9 @@ class LightspeedService:
         last = None
         for attempt in range(3):
             if attempt:
-                await asyncio.sleep(0.25 * attempt)
+                # Stock writes may become visible after the update acknowledges.
+                # Retry reads only; never repeat the inventory write here.
+                await asyncio.sleep((1.0, 3.0)[attempt - 1])
             try:
                 return await asyncio.to_thread(read_inventory_for_verification, self, product_id, outlet_id, expected_quantity)
             except Exception as exc:
@@ -2745,6 +2747,7 @@ class LightspeedService:
                 exc_info=True
             )
             return False
+
 
 
 

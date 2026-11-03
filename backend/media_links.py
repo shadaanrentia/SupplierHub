@@ -1,4 +1,4 @@
-"""Supplier-provided associations only; never infer colour from filenames or SKU prefixes."""
+"""Supplier associations plus a restricted exact SanMar filename recovery path."""
 import json
 import re
 
@@ -48,3 +48,69 @@ def resolved_links(item, variants):
         same=[str(v['variant_sku']) for v in variants if colour_key(v.get('color'))==colour_key(colour)]
         parts=list(dict.fromkeys(parts+same))
     return colour,parts,bool(any(p.casefold() in by_sku for p in parts))
+
+
+
+def associate_sanmar_images(images, variants, product_sku):
+    """Recover missing associations from exact SanMar product/colour filename tokens.
+
+    Explicit supplier associations always take precedence. This fallback rejects
+    other hosts, products, unknown colours and ambiguous colour matches.
+    Inventory and size never control image eligibility.
+    """
+    from urllib.parse import urlsplit, unquote
+    style = str(product_sku or '').strip().casefold()
+    result = []
+    colours = {}
+    for variant in variants:
+        colour = str(variant.get('color') or '').strip()
+        if usable(colour):
+            colours.setdefault(colour_key(colour), colour)
+    compact = {}
+    for key in colours:
+        compact.setdefault(re.sub(r'[^a-z0-9]', '', key), []).append(key)
+    for original in images:
+        image = dict(original)
+        parts = image.get('source_part_ids') or image.get('part_ids') or []
+        if isinstance(parts, str):
+            try:
+                parts = json.loads(parts)
+            except (ValueError, TypeError):
+                parts = [parts]
+        explicit_parts = bool(parts)
+        explicit_colour = image.get('source_color') or image.get('color') or image.get('part_color')
+        if not style or explicit_parts or usable(explicit_colour):
+            result.append(image)
+            continue
+        try:
+            url = urlsplit(str(image.get('url') or ''))
+            filename = unquote(url.path.rsplit('/', 1)[-1])
+            stem, extension = filename.rsplit('.', 1)
+            port = url.port
+        except (ValueError, TypeError):
+            result.append(image)
+            continue
+        tokens = re.split(r'[_\-\s]+', stem.casefold())
+        if (url.scheme != 'https' or url.hostname != 'media.sanmarcanada.com'
+                or port not in (None, 443) or url.username is not None
+                or not url.path.startswith('/catalog/product/')
+                or extension.casefold() not in ('jpg', 'jpeg', 'png', 'webp')
+                or len(tokens) < 2 or tokens[0] != style):
+            result.append(image)
+            continue
+        matches = set()
+        for start in range(1, len(tokens)):
+            for end in range(start + 1, min(len(tokens), start + 6) + 1):
+                token = ''.join(tokens[start:end])
+                matches.update(compact.get(token, []))
+        if len(matches) == 1:
+            key = next(iter(matches))
+            # A compact spelling must identify exactly one catalogue colour.
+            if len(compact[re.sub(r'[^a-z0-9]', '', key)]) == 1:
+                ids = [str(v.get('variant_sku') or '').strip() for v in variants
+                       if colour_key(v.get('color')) == key and usable(v.get('variant_sku'))]
+                if ids:
+                    image.update(source_color=colours[key], source_part_ids=list(dict.fromkeys(ids)),
+                                 association_source='sanmar_exact_product_colour_filename')
+        result.append(image)
+    return result
