@@ -86,7 +86,7 @@ def verify_legacy_inventory(response, product_id, outlet_id, expected_quantity):
 
 
 def read_inventory_for_verification(service, product_id, outlet_id, expected_quantity):
-    """Read modern inventory, falling back to the explicit legacy read only
+    """Read modern inventory, falling back to the dedicated inventory read only
     when the correctly identified modern product omits its inventory field.
     No write is repeated and a real quantity mismatch cannot use fallback.
     """
@@ -96,11 +96,39 @@ def read_inventory_for_verification(service, product_id, outlet_id, expected_qua
         return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
     if 'outlet_inventories' in row:
         return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
+    # Product resources may omit stock. Read the documented inventory resource.
     service._throttle()
-    legacy_response = service._http_session().get(
-        f'https://{service.domain_prefix}.retail.lightspeed.app/api/2.0/products/{product_id}',
-        headers=service._headers(), timeout=120)
-    service._handle_rate_limit(legacy_response)
-    legacy = service._handle_response(legacy_response)
-    return verify_legacy_inventory(legacy, product_id, outlet_id, expected_quantity)
+    inventory_response = service._http_session().get(
+        f'https://{service.domain_prefix}.retail.lightspeed.app/api/2026-07/inventory/{product_id}',
+        headers=service._headers(),
+        params={'variants': 'false', 'include_deleted': 'false', 'page_size': 5000},
+        timeout=120,
+    )
+    service._handle_rate_limit(inventory_response)
+    if inventory_response.status_code == 403:
+        raise ValueError('Inventory verification requires inventory:read permission; reconnect Lightspeed with this scope')
+    records = service._handle_response(inventory_response)
+    return verify_inventory_records(records, product_id, outlet_id, expected_quantity)
 
+
+def verify_inventory_records(records, product_id, outlet_id, expected_quantity):
+    """2026-07 inventory GET returns a flat array, not a product/data wrapper."""
+    expected = quantity(expected_quantity)
+    if not isinstance(records, list):
+        raise ValueError('Inventory endpoint did not return an inventory array')
+    if len(records) >= 5000:
+        raise ValueError('Inventory response may be truncated; verification cannot be confirmed')
+    matches = []
+    for row in records:
+        if not isinstance(row, dict) or str(row.get('product_id') or '') != str(product_id):
+            raise ValueError('Inventory endpoint returned the wrong product')
+        if row.get('deleted_at'):
+            raise ValueError('Inventory endpoint returned a deleted inventory record')
+        if str(row.get('outlet_id') or '') == str(outlet_id):
+            matches.append(row)
+    if len(matches) != 1:
+        raise ValueError('Inventory readback needs exactly one record for the selected outlet')
+    actual = quantity(matches[0].get('current_inventory_level'))
+    if actual != expected:
+        raise ValueError(f'Inventory mismatch for {product_id} at outlet {outlet_id}: expected {expected}, received {actual}')
+    return True
