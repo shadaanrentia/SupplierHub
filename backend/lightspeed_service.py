@@ -1503,14 +1503,13 @@ class LightspeedService:
 
 
     async def _verify_remote_inventory(self, product_id, outlet_id, expected_quantity):
-        from inventory_selection import verify_member_inventory
+        from inventory_selection import read_inventory_for_verification
         last = None
         for attempt in range(3):
             if attempt:
                 await asyncio.sleep(0.25 * attempt)
             try:
-                response = await asyncio.to_thread(self.family_request, 'GET', f'products/{product_id}')
-                return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
+                return await asyncio.to_thread(read_inventory_for_verification, self, product_id, outlet_id, expected_quantity)
             except Exception as exc:
                 last = exc
         if isinstance(last, ValueError):
@@ -2664,11 +2663,8 @@ class LightspeedService:
                     "Lightspeed rejected inventory update"
                 )
 
-            from inventory_selection import verify_member_inventory
-            verify_member_inventory(
-                self.family_request('GET', f'products/{product_id}'),
-                product_id, outlet_id, safe_count,
-            )
+            from inventory_selection import read_inventory_for_verification
+            read_inventory_for_verification(self, product_id, outlet_id, safe_count)
             logger.info(
                 "Inventory overwrite verified: "
                 "product=%s outlet=%s count=%s",

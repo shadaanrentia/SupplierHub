@@ -64,3 +64,43 @@ def verify_member_inventory(response, product_id, outlet_id, expected_quantity):
     if actual != expected:
         raise ValueError(f'Inventory mismatch for {product_id} at outlet {outlet_id}: expected {expected}, received {actual}')
     return True
+
+
+def verify_legacy_inventory(response, product_id, outlet_id, expected_quantity):
+    """Validate a 2.0 product read; never interpret a missing row as zero."""
+    row = response.get('data') if isinstance(response, dict) else None
+    if not isinstance(row, dict) or str(row.get('id') or '') != str(product_id):
+        raise ValueError('Legacy inventory readback returned the wrong product')
+    entries = row.get('inventory')
+    if not isinstance(entries, list):
+        raise ValueError('Legacy inventory readback did not include inventory records')
+    normalized = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError('Invalid legacy inventory record')
+        if entry.get('product_id') is not None and str(entry['product_id']) != str(product_id):
+            raise ValueError('Legacy inventory record belongs to another product')
+        normalized.append({'outlet_id': entry.get('outlet_id'), 'current_amount': entry.get('count')})
+    return verify_member_inventory({'data': {'id': row['id'], 'outlet_inventories': normalized}},
+                                   product_id, outlet_id, expected_quantity)
+
+
+def read_inventory_for_verification(service, product_id, outlet_id, expected_quantity):
+    """Read modern inventory, falling back to the explicit legacy read only
+    when the correctly identified modern product omits its inventory field.
+    No write is repeated and a real quantity mismatch cannot use fallback.
+    """
+    response = service.family_request('GET', f'products/{product_id}')
+    row = response.get('data') if isinstance(response, dict) else None
+    if not isinstance(row, dict) or str(row.get('id') or '') != str(product_id):
+        return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
+    if 'outlet_inventories' in row:
+        return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
+    service._throttle()
+    legacy_response = service._http_session().get(
+        f'https://{service.domain_prefix}.retail.lightspeed.app/api/2.0/products/{product_id}',
+        headers=service._headers(), timeout=120)
+    service._handle_rate_limit(legacy_response)
+    legacy = service._handle_response(legacy_response)
+    return verify_legacy_inventory(legacy, product_id, outlet_id, expected_quantity)
+
