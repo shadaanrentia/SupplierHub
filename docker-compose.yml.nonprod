@@ -1,4 +1,4 @@
-### Non-Prod Docker Compose file ###
+#### Non-Prod Docker Compose file ####
 name: sphubsbox
 
 services:
