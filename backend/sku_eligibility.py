@@ -29,8 +29,8 @@ def missing_price(value):
 
 
 def invalid_inventory(value):
-    """Reject missing, malformed, non-finite or non-positive stock."""
-    if value is None:
+    """Reject missing, malformed, non-finite or negative or fractional stock."""
+    if value is None or isinstance(value, bool):
         return True
 
     try:
@@ -38,7 +38,7 @@ def invalid_inventory(value):
     except (ValueError, TypeError, OverflowError):
         return True
 
-    return not math.isfinite(inventory) or inventory <= 0
+    return not math.isfinite(inventory) or inventory < 0 or not inventory.is_integer()
 
 
 def skip_sku(row):

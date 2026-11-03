@@ -1094,6 +1094,10 @@ class LightspeedService:
         )
 
         try:
+            # Warehouse selection is performed once by export_safety.export_product.
+            # Lower-level methods validate prepared quantities without database access.
+            from inventory_selection import select_inventory
+            supplier_variants = select_inventory(supplier_variants)
             # =========================================================
             # 1. GET PRODUCT NAME
             # =========================================================
@@ -1492,105 +1496,56 @@ class LightspeedService:
 
 
     async def _verify_remote_inventory(self, product_id, outlet_id, expected_quantity):
-        """Read-only candidate verifier; response format is not production validated.
+        from inventory_selection import verify_member_inventory
+        last = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(0.25 * attempt)
+            try:
+                response = await asyncio.to_thread(self.family_request, 'GET', f'products/{product_id}')
+                return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
+            except Exception as exc:
+                last = exc
+        if isinstance(last, ValueError):
+            from inventory_verification import InventoryVerificationError
+            raise InventoryVerificationError('Inventory overwrite could not be verified: ' + str(last)) from last
+        raise last
 
-        A missing or incomplete response must never be treated as verified.
-        This method is only called when the opt-in feature flag is enabled.
-        """
-        from lightspeed_inventory_adapter import normalize_inventory_levels
-        from inventory_verification import (
-            InventoryVerificationError,
-            verify_inventory_level,
-        )
-
-        response = await asyncio.to_thread(
-            self._get,
-            f"inventory_levels/{product_id}",
-        )
-        if not isinstance(response, dict) or response.get("_lightspeed_validation_error"):
-            raise InventoryVerificationError("Invalid inventory response")
-
-        pagination = response.get("pagination")
-        if not isinstance(pagination, dict):
-            raise InventoryVerificationError("Inventory pagination not verified")
-        if pagination.get("next") not in (None, ""):
-            raise InventoryVerificationError(
-                "Additional inventory pages require verification"
-            )
-
-        records = normalize_inventory_levels(response)
-        return verify_inventory_level(
-            records, product_id, outlet_id, expected_quantity
-        )
-
-    async def _sync_single_variant(
-        self,
-        ls_variant_id: str,
-        variant_sku: str,
-        update_payload: dict,
-        measurements=None,
-        measurement_snapshot=None,
-    ):
+    async def _sync_single_variant(self, ls_variant_id, variant_sku, update_payload,
+                                   measurements=None, measurement_snapshot=None):
         async with self._variant_sync_semaphore:
             try:
-                result = await asyncio.to_thread(
-                    self._put_legacy_21,
-                    f"products/{ls_variant_id}",
-                    update_payload,
-                )
-                if isinstance(result, dict) and result.get("_lightspeed_validation_error"):
-                    return {"success": False, "sku": variant_sku, "error": result}
-
-                # Temporary opt-in: the remote inventory API response envelope
-                # still needs validation in an isolated Lightspeed test store.
-                verify_enabled = (
-                    os.getenv("LIGHTSPEED_VERIFY_INVENTORY_READBACK", "0") == "1"
-                )
-
-                if verify_enabled:
-                    details = update_payload.get("details") if isinstance(update_payload, dict) else None
-                    if not isinstance(details, dict):
-                        raise ValueError("Cannot verify: missing variant details")
-                    inventory = details.get("inventory")
-                    if (
-                        not isinstance(inventory, list)
-                        or len(inventory) != 1
-                        or not isinstance(inventory[0], dict)
-                    ):
-                        raise ValueError("Cannot verify: expected one outlet inventory")
-                    expected = inventory[0]
-                    outlet_id = expected.get("outlet_id")
-                    if not outlet_id or "current_amount" not in expected:
-                        raise ValueError("Cannot verify: missing outlet or quantity")
-
-                    verified = await self._verify_remote_inventory(
-                        ls_variant_id, str(outlet_id), expected["current_amount"]
-                    )
+                from inventory_selection import quantity
+                details = update_payload.get('details') if isinstance(update_payload, dict) else None
+                if not isinstance(details, dict):
+                    raise ValueError('Missing variant details before writing')
+                writes_inventory = 'inventory' in details
+                payload = update_payload
+                if writes_inventory:
+                    entries = details['inventory']
+                    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+                        raise ValueError('Expected exactly one inventory outlet before writing')
+                    expected = entries[0]
+                    outlet = str(expected.get('outlet_id') or '').strip()
+                    if not outlet:
+                        raise ValueError('Missing inventory outlet before writing')
+                    amount = quantity(expected.get('current_amount'))
+                    payload = dict(update_payload, details=dict(details, inventory=[dict(expected, current_amount=amount)]))
+                result = await asyncio.to_thread(self._put_legacy_21, f'products/{ls_variant_id}', payload)
+                if isinstance(result, dict) and result.get('_lightspeed_validation_error'):
+                    return {'success':False,'sku':variant_sku,'error':result}
+                if writes_inventory:
+                    verified = await self._verify_remote_inventory(ls_variant_id, outlet, amount)
                     if verified is not True:
-                        raise ValueError("Inventory readback not confirmed")
-
+                        raise ValueError('Inventory readback not confirmed')
                 if measurements:
-                    await asyncio.to_thread(
-                        self._sync_measurements,
-                        ls_variant_id,
-                        measurements,
-                        measurement_snapshot,
-                    )
-
-                return {
-                    "success": True,
-                    "sku": variant_sku,
-                    "result": result,
-                    "inventory_verified": verify_enabled,
-                }
+                    await asyncio.to_thread(self._sync_measurements, ls_variant_id, measurements, measurement_snapshot)
+                if writes_inventory:
+                    logger.info('Inventory overwrite verified: SKU=%s outlet=%s quantity=%s', variant_sku, outlet, amount)
+                return {'success':True,'sku':variant_sku,'result':result,'inventory_verified':writes_inventory}
             except Exception as exc:
-                logger.error(
-                    "Variant update or verification failed for %s: %s",
-                    variant_sku,
-                    exc,
-                    exc_info=True,
-                )
-                return {"success": False, "sku": variant_sku, "error": str(exc)}
+                logger.error('Variant update or inventory verification failed for %s: %s', variant_sku, exc)
+                return {'success':False,'sku':variant_sku,'error':str(exc)}
 
     def _get_inventory_outlet_id(self):
         configured_id = os.getenv("LIGHTSPEED_OUTLET_ID", "").strip()
@@ -1687,6 +1642,8 @@ class LightspeedService:
 
     async def _create_product(self, product: dict, variants: list, cost_price: float, sale_price: float, supplier_id: str = None, brand_id: str = None) -> str:
         """Create a product, handling Lightspeed duplicate-product responses."""
+        from inventory_selection import select_inventory
+        variants = select_inventory(variants)
         product_name = product.get("product_name", "")
         description = description_html(product.get("description", "") or "")
         sku = product.get("supplier_sku", "")
@@ -2626,7 +2583,6 @@ class LightspeedService:
         }
 
     # ==================== INVENTORY ====================
-    
     def update_product_inventory(
         self,
         product_id: str,
@@ -2684,17 +2640,12 @@ class LightspeedService:
             safe_count = int(quantity)
 
             # The only remote mutation in this method.
-            response = self._put(
+            response = self._put_legacy_21(
                 f"products/{product_id}",
-                {
-                    "has_inventory": True,
-                    "inventory": [
-                        {
-                            "outlet_id": outlet_id,
-                            "count": safe_count,
-                        }
-                    ],
-                },
+                {"details": {"inventory": [{
+                    "outlet_id": outlet_id,
+                    "current_amount": safe_count,
+                }]}},
             )
 
             if isinstance(response, dict) and (
@@ -2705,8 +2656,13 @@ class LightspeedService:
                     "Lightspeed rejected inventory update"
                 )
 
+            from inventory_selection import verify_member_inventory
+            verify_member_inventory(
+                self.family_request('GET', f'products/{product_id}'),
+                product_id, outlet_id, safe_count,
+            )
             logger.info(
-                "Inventory update request accepted: "
+                "Inventory overwrite verified: "
                 "product=%s outlet=%s count=%s",
                 product_id,
                 outlet_id,
@@ -2718,6 +2674,7 @@ class LightspeedService:
                 "product_id": product_id,
                 "outlet_id": outlet_id,
                 "count": safe_count,
+                "inventory_verified": True,
             }
 
         except Exception as exc:
@@ -2784,5 +2741,6 @@ class LightspeedService:
                 exc_info=True
             )
             return False
+
 
 

@@ -36,7 +36,7 @@ def make_product():
 @pytest.mark.asyncio
 async def test_legacy_export_rejects_all_excluded_skus():
     variants = make_variants(1)
-    variants[0]["inventory"] = 0
+    variants[0]["inventory"] = -1
 
     with pytest.raises(
         ValueError,

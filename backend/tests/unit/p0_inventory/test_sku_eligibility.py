@@ -51,7 +51,7 @@ def test_missing_price(price, expected):
     [
         (10, 100, False),
         (10, 1, False),
-        (10, 0, True),
+        (10, 0, False),
         (0, 100, True),
         ("-", 100, True),
         (None, 50, True),
@@ -101,8 +101,8 @@ def test_eligible_variants():
 
     result = eligible_variants(variants)
 
-    assert len(result) == 1
-    assert result[0]["variant_sku"] == "SKU001"
+    assert len(result) == 2
+    assert {row["variant_sku"] for row in result} == {"SKU001", "SKU003"}
 
 
 # ============================================================

@@ -337,34 +337,8 @@ async def get_product(
             if settings and settings["preferred_warehouse"]
             else ""
         )
-        for v in variants:
-            warehouse_inventory = v.get(
-                "warehouse_inventory",
-                []
-            )
-            if isinstance(warehouse_inventory, str):
-                try:
-                    warehouse_inventory = json.loads(
-                        warehouse_inventory
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    warehouse_inventory = []
-            if isinstance(warehouse_inventory, list):
-                for wh in warehouse_inventory:
-                    if not isinstance(wh, dict):
-                        continue
-                    if wh.get("name") == preferred_warehouse:
-                        v["inventory"] = wh.get(
-                            "quantity",
-                            0
-                        )
-                        v["warehouse_name"] = wh.get(
-                            "name",
-                            ""
-                        )
-                        break
-            if "inventory" not in v:
-                v["inventory"] = 0
+        from inventory_selection import select_inventory
+        variants = select_inventory(variants, preferred_warehouse, strict=False)
         product["variants"] = variants
         product["media"] = media
         product["preferred_warehouse"] = preferred_warehouse

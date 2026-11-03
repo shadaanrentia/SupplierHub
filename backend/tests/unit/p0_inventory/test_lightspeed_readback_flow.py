@@ -28,7 +28,7 @@ def service(monkeypatch):
     get_mock = MagicMock()
 
     monkeypatch.setattr(ls, "_put_legacy_21", put_mock)
-    monkeypatch.setattr(ls, "_get", get_mock)
+    monkeypatch.setattr(ls, "family_request", get_mock)
 
     return ls, put_mock, get_mock
 
@@ -45,19 +45,10 @@ def update_payload(quantity):
     }
 
 
-def inventory_response(quantity, next_page=None):
-    # Synthetic API fixture.
-    # The response shape still requires real API validation.
-    return {
-        "data": [{
-            "product_id": "remote-001",
-            "location_id": "outlet-001",
-            "current_inventory_level": quantity,
-        }],
-        "pagination": {
-            "next": next_page,
-        },
-    }
+def inventory_response(quantity):
+    return {'data':{'id':'remote-001','outlet_inventories':[{
+        'outlet_id':'outlet-001','current_amount':quantity,
+    }]}}
 
 
 @pytest.mark.asyncio
@@ -81,7 +72,7 @@ async def test_zero_inventory_verified_end_to_end(service):
     )
 
     get_mock.assert_called_once_with(
-        "inventory_levels/remote-001"
+        "GET", "products/remote-001"
     )
 
 
@@ -103,7 +94,7 @@ async def test_stale_inventory_cannot_report_success(service):
 
     # A failed readback must NOT blindly repeat the write.
     assert put_mock.call_count == 1
-    assert get_mock.call_count == 1
+    assert get_mock.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -111,7 +102,7 @@ async def test_missing_outlet_cannot_report_success(service):
     ls, put_mock, get_mock = service
 
     response = inventory_response(0)
-    response["data"][0]["location_id"] = "wrong-outlet"
+    response["data"]["outlet_inventories"][0]["outlet_id"] = "wrong-outlet"
 
     get_mock.return_value = response
 
@@ -126,13 +117,13 @@ async def test_missing_outlet_cannot_report_success(service):
 
 
 @pytest.mark.asyncio
-async def test_incomplete_pagination_cannot_report_success(service):
+async def test_legacy_collection_response_cannot_report_success(service):
     ls, put_mock, get_mock = service
 
-    get_mock.return_value = inventory_response(
-        0,
-        next_page="another-page",
-    )
+    get_mock.return_value = {
+        'data':[{'product_id':'remote-001','location_id':'outlet-001','current_inventory_level':0}],
+        'pagination':{'next':'another-page'},
+    }
 
     result = await ls._sync_single_variant(
         "remote-001",
@@ -141,7 +132,7 @@ async def test_incomplete_pagination_cannot_report_success(service):
     )
 
     assert result["success"] is False
-    assert "page" in result["error"].lower()
+    assert "wrong product" in result["error"].lower()
     assert put_mock.call_count == 1
 
 
@@ -163,4 +154,5 @@ async def test_inventory_readback_timeout_cannot_report_success(service):
 
     # A timeout does not authorize another inventory write.
     put_mock.assert_called_once()
-    get_mock.assert_called_once()
+    assert get_mock.call_count == 3
+

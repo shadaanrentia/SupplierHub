@@ -17,8 +17,14 @@ def service():
 
     # No network calls are permitted.
     ls.mock_mode = False
-    ls._put = MagicMock(return_value={"data": {}})
+    ls._put_legacy_21 = MagicMock(return_value={"data": {}})
     ls._get_outlets = MagicMock(return_value=[])
+    def read_member(method, endpoint):
+        assert method == 'GET'
+        assert endpoint == 'products/product-123'
+        sent = ls._put_legacy_21.call_args.args[1]['details']['inventory'][0]
+        return {'data':{'id':'product-123','outlet_inventories':[dict(sent)]}}
+    ls.family_request = MagicMock(side_effect=read_member)
 
     return ls
 
@@ -48,7 +54,7 @@ def test_invalid_inventory_never_reaches_lightspeed(
 
     # Most important assertion:
     # an invalid quantity must not be sent remotely.
-    service._put.assert_not_called()
+    service._put_legacy_21.assert_not_called()
 
 
 def test_valid_zero_inventory_is_allowed(service):
@@ -60,15 +66,15 @@ def test_valid_zero_inventory_is_allowed(service):
 
     assert result["success"] is True
 
-    service._put.assert_called_once()
+    service._put_legacy_21.assert_called_once()
 
-    endpoint, payload = service._put.call_args.args
+    endpoint, payload = service._put_legacy_21.call_args.args
 
     assert endpoint == "products/product-123"
-    assert payload["inventory"] == [
+    assert payload["details"]["inventory"] == [
         {
             "outlet_id": "outlet-123",
-            "count": 0,
+            "current_amount": 0,
         }
     ]
 
@@ -81,7 +87,7 @@ def test_missing_product_id_never_writes(service):
     )
 
     assert result["success"] is False
-    service._put.assert_not_called()
+    service._put_legacy_21.assert_not_called()
 
 
 def test_missing_outlet_id_never_writes(service):
@@ -92,7 +98,7 @@ def test_missing_outlet_id_never_writes(service):
     )
 
     assert result["success"] is False
-    service._put.assert_not_called()
+    service._put_legacy_21.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -117,7 +123,7 @@ def test_additional_invalid_quantities_never_write(
     )
 
     assert result["success"] is False
-    service._put.assert_not_called()
+    service._put_legacy_21.assert_not_called()
 
 
 def test_whole_number_string_is_accepted(service):
@@ -129,12 +135,12 @@ def test_whole_number_string_is_accepted(service):
 
     assert result["success"] is True
 
-    payload = service._put.call_args.args[1]
-    assert payload["inventory"][0]["count"] == 25
+    payload = service._put_legacy_21.call_args.args[1]
+    assert payload["details"]["inventory"][0]["current_amount"] == 25
 
 
 def test_failed_lightspeed_update_not_reported_as_success(service):
-    service._put.side_effect = RuntimeError(
+    service._put_legacy_21.side_effect = RuntimeError(
         "Simulated Lightspeed failure"
     )
 
@@ -145,4 +151,5 @@ def test_failed_lightspeed_update_not_reported_as_success(service):
     )
 
     assert result["success"] is False
-    service._put.assert_called_once()
+    service._put_legacy_21.assert_called_once()
+

@@ -21,6 +21,8 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
     excluded = bool(active) and not variants
     images = [dict(i) for i in images if i.get('media_type') == 'image' and str(i.get('url') or '').strip()]
     errors = []
+    if any(v.get('inventory_error') for v in active):
+        errors.append('Selected warehouse inventory is missing or invalid; refresh supplier inventory before syncing')
     if excluded: errors.append('All active variant SKUs are temporarily excluded: missing price and zero inventory')
     if not str(product.get('product_name') or '').strip(): errors.append('Product name is missing')
     if not str(product.get('supplier_sku') or '').strip(): errors.append('Supplier SKU is missing')
@@ -70,12 +72,15 @@ async def load_readiness(conn, products, include_assets=True):
     if not products: return {}
     ids = [p['id'] for p in products]
     supplier_ids = list({p['supplier_id'] for p in products if p.get('supplier_id')})
-    settings = await conn.fetchrow("SELECT lightspeed_store_id FROM settings WHERE id='system_settings'")
+    settings = await conn.fetchrow("SELECT lightspeed_store_id,preferred_warehouse FROM settings WHERE id='system_settings'")
     domain = str(settings['lightspeed_store_id'] or '').strip() if settings else ''
     variants, images, groups = defaultdict(list), defaultdict(list), defaultdict(list)
-    variant_columns = '*' if include_assets else 'id,product_id,variant_sku,color,size,price,inventory,is_active,price_needs_review'
+    variant_columns = '*' if include_assets else 'id,product_id,variant_sku,color,size,price,inventory,warehouse_inventory,is_active,price_needs_review'
     image_columns = '*' if include_assets else 'id,product_id,url,media_type,is_primary,created_at'
     for r in await conn.fetch(f'SELECT {variant_columns} FROM product_variants WHERE product_id=ANY($1::varchar[]) AND is_active IS DISTINCT FROM FALSE', ids): variants[r['product_id']].append(dict(r))
+    from inventory_selection import select_inventory
+    for pid in variants:
+        variants[pid] = select_inventory(variants[pid], settings['preferred_warehouse'] if settings else '', strict=False)
     for r in await conn.fetch(f"SELECT {image_columns} FROM product_media WHERE product_id=ANY($1::varchar[]) AND media_type='image' ORDER BY is_primary DESC,created_at", ids): images[r['product_id']].append(dict(r))
     for r in await conn.fetch('SELECT * FROM lightspeed_export_groups WHERE product_id=ANY($1::varchar[]) AND store_domain=$2 ORDER BY group_number', ids, domain): groups[r['product_id']].append(dict(r))
     managed = {r['supplier_id'] for r in await conn.fetch('SELECT supplier_id FROM supplier_taxonomy_imports WHERE supplier_id=ANY($1::varchar[])', supplier_ids)}

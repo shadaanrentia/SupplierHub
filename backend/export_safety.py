@@ -212,6 +212,9 @@ async def _legacy_export_product(ls, product, variants, images, markup, category
 
 
 async def export_product(ls, product, variants, images, markup, category_id):
+    from inventory_selection import export_inventory
+    async with deps.pool.acquire() as inventory_conn:
+        variants = await export_inventory(inventory_conn, [v for v in variants if v.get('is_active') is not False])
     from pricing_rules import ensure_pricing_schema
     await ensure_pricing_schema()
     from export_format import assert_service_compatible

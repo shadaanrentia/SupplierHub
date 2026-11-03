@@ -11,7 +11,7 @@ def service(monkeypatch):
     ls = LightspeedService()
     monkeypatch.setenv("LIGHTSPEED_VERIFY_INVENTORY_READBACK", "1")
     monkeypatch.setattr(ls, "_put_legacy_21", MagicMock(return_value={"data": {"id": "remote-s"}}))
-    verifier = AsyncMock()
+    verifier = AsyncMock(return_value=True)
     monkeypatch.setattr(ls, "_verify_remote_inventory", verifier)
     return ls, verifier
 
@@ -63,10 +63,11 @@ async def test_missing_outlet_is_rejected(service):
 
 
 @pytest.mark.asyncio
-async def test_verification_disabled_uses_legacy_behavior(service, monkeypatch):
+async def test_verification_is_required_without_feature_flag(service, monkeypatch):
     ls, verifier = service
     monkeypatch.delenv("LIGHTSPEED_VERIFY_INVENTORY_READBACK", raising=False)
     result = await ls._sync_single_variant("remote-s", "SKU-S", payload(0))
     assert result["success"] is True
-    assert result["inventory_verified"] is False
-    verifier.assert_not_awaited()
+    assert result["inventory_verified"] is True
+    verifier.assert_awaited_once_with("remote-s", "test-outlet", 0)
+

@@ -4,7 +4,7 @@
 All HTTP operations are mocked.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
@@ -17,6 +17,7 @@ def service(monkeypatch):
 
     put = MagicMock(return_value={"data": {"id": "remote-001"}})
     measurements = MagicMock()
+    monkeypatch.setattr(ls, "_verify_remote_inventory", AsyncMock(return_value=True))
 
     monkeypatch.setattr(ls, "_put_legacy_21", put)
     monkeypatch.setattr(ls, "_sync_measurements", measurements)
