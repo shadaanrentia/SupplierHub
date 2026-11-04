@@ -19,6 +19,30 @@ def family_name(product, group, variants):
     return f"{product_title(product['product_name'],product['supplier_sku'])} — Sizes {label} ({int(group['group_number']):02d})"
 
 
+def verify_group_destination(family, expected_skus, found, destination, expected_name, group_number):
+    """Verify ownership using source SKU aliases; retain all conflict checks."""
+    expected = {str(value).strip().lower() for value in expected_skus}
+    remote = members(family, expected_skus=expected)
+    remote_ids = {str(value['id']) for value in remote.values()}
+    saved_verified = destination is not None and str(destination) in remote_ids
+    outside = sorted(set(remote) - expected)
+    conflicting_ids = sorted({str(value['id']) for value in found.values()} - remote_ids)
+    reasons = []
+    if outside:
+        reasons.append('SKUs outside this group: ' + ', '.join(outside[:8]))
+    if conflicting_ids:
+        reasons.append('SKU searches found members in another family: ' + ', '.join(conflicting_ids[:4]))
+    if not saved_verified and family.get('name') != expected_name:
+        reasons.append('expected name=' + repr(expected_name) + '; actual name=' + repr(family.get('name')))
+    if not remote:
+        reasons.append('destination family has no identifiable members')
+    if reasons:
+        raise ValueError('Destination ownership could not be verified; no writes made. '
+                         + 'Group ' + str(group_number) + '; family=' + str(family.get('id') or 'unknown')
+                         + '; ' + '; '.join(reasons))
+    return remote
+
+
 async def export_families(ls, product, variants, images, markup, category_id):
     from export_format import assert_service_compatible
     assert_service_compatible(ls)
@@ -73,7 +97,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 deleted = destination and await asyncio.to_thread(ls.remote_product_deleted, destination)
                 if destination and not deleted:
                     family = await asyncio.to_thread(ls.remote_family, str(destination))
-                    owned = members(family)
+                    owned = members(family, expected_skus=[sku(v) for v in batch])
                     if str(destination) not in {str(v['id']) for v in owned.values()}:
                         raise ValueError('Saved destination is not a member of its returned family')
                     if not set(owned).issubset({sku(v) for v in batch}):
@@ -95,29 +119,8 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 if destination or found:
                     candidate = str(destination or next(iter(found.values()))['id'])
                     family = family or await asyncio.to_thread(ls.remote_family, candidate)
-                    remote = members(family)
-                    expected = {sku(v) for v in batch}
-                    remote_ids = {str(v['id']) for v in remote.values()}
-                    # A verified saved destination remains ours when its display name changes.
-                    saved_destination_verified = (
-                        destination is not None
-                        and str(destination) in remote_ids
-                    )
-
-                    name_matches = family.get("name") == name
-                    source_skus_match = set(remote).issubset(expected)
-                    found_members_match = {
-                        str(v["id"]) for v in found.values()
-                    }.issubset(remote_ids)
-
-                    if (
-                        not source_skus_match
-                        or not found_members_match
-                        or (not saved_destination_verified and not name_matches)
-                    ):
-                        raise ValueError(
-                            "Destination ownership could not be verified; no writes made"
-                        )
+                    remote = verify_group_destination(
+                        family, [sku(v) for v in batch], found, destination, name, group['group_number'])
                     destination = str(next(iter(remote.values()))['id'])
                     await conn.execute('UPDATE lightspeed_export_groups SET lightspeed_product_id=$2 WHERE id=$1',group['id'],destination)
                 elif group['state'] in ('uncertain','creating','done','images_pending'):
@@ -234,5 +237,6 @@ async def export_families(ls, product, variants, images, markup, category_id):
             return {'success':False,'error':str(exc),'completed_groups':completed}
         finally:
             await conn.execute('SELECT pg_advisory_unlock(hashtext($1))',lock)
+
 
 
