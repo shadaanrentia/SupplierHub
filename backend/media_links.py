@@ -51,6 +51,22 @@ def resolved_links(item, variants):
 
 
 
+def sanmar_colour_alias(value):
+    """Known SanMar label abbreviations; not a fuzzy or substring matcher."""
+    key = colour_key(value)
+    aliases = {
+        'charcoal hthr': 'charcoal heather',
+        'hthr cardinal': 'heather cardinal',
+        'hthr forest': 'heather forest',
+        'hthr navy': 'heather navy',
+        'hthr teal': 'heather teal',
+        'extreme yello': 'extreme yellow',
+        '~orange': 'orange',
+        '~silver': 'silver',
+    }
+    return aliases.get(key, key)
+
+
 def associate_sanmar_images(images, variants, product_sku):
     """Recover missing associations from exact SanMar product/colour filename tokens.
 
@@ -65,7 +81,7 @@ def associate_sanmar_images(images, variants, product_sku):
     for variant in variants:
         colour = str(variant.get('color') or '').strip()
         if usable(colour):
-            colours.setdefault(colour_key(colour), colour)
+            colours.setdefault(sanmar_colour_alias(colour), colour)
     compact = {}
     for key in colours:
         compact.setdefault(re.sub(r'[^a-z0-9]', '', key), []).append(key)
@@ -108,9 +124,10 @@ def associate_sanmar_images(images, variants, product_sku):
             # A compact spelling must identify exactly one catalogue colour.
             if len(compact[re.sub(r'[^a-z0-9]', '', key)]) == 1:
                 ids = [str(v.get('variant_sku') or '').strip() for v in variants
-                       if colour_key(v.get('color')) == key and usable(v.get('variant_sku'))]
+                       if sanmar_colour_alias(v.get('color')) == key and usable(v.get('variant_sku'))]
                 if ids:
                     image.update(source_color=colours[key], source_part_ids=list(dict.fromkeys(ids)),
                                  association_source='sanmar_exact_product_colour_filename')
         result.append(image)
     return result
+
