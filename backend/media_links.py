@@ -25,7 +25,8 @@ def xml_links(element):
     return {'part_ids':parts,'color':colours[0] if len(colours)==1 else ''}
 
 
-def resolved_links(item, variants):
+def resolved_links(item, variants, colour_normalizer=None):
+    key = colour_normalizer or colour_key
     parts=item.get('part_ids') or item.get('partIds') or item.get('source_part_ids') or []
     if not parts and item.get('part_id'):parts=[item['part_id']]
     if isinstance(parts,str):
@@ -37,15 +38,15 @@ def resolved_links(item, variants):
     if not usable(colour): colour=''
     by_sku={str(v.get('variant_sku') or '').strip().casefold():v for v in variants}
     matched=[by_sku[p.casefold()] for p in parts if p.casefold() in by_sku]
-    known_colours={colour_key(v.get('color')) for v in matched if colour_key(v.get('color'))}
+    known_colours={key(v.get('color')) for v in matched if key(v.get('color'))}
     if not colour and len(known_colours)==1:
-        colour=next(v['color'] for v in matched if colour_key(v.get('color')))
-    if colour and known_colours and known_colours!={colour_key(colour)}:
+        colour=next(v['color'] for v in matched if key(v.get('color')))
+    if colour and known_colours and known_colours!={key(colour)}:
         # Contradictory metadata cannot safely identify a variant image.
         return '',[],False
     # Expand only a verified, unambiguous colour association to all of its sizes.
-    if colour and (not known_colours or known_colours=={colour_key(colour)}):
-        same=[str(v['variant_sku']) for v in variants if colour_key(v.get('color'))==colour_key(colour)]
+    if colour and (not known_colours or known_colours=={key(colour)}):
+        same=[str(v['variant_sku']) for v in variants if key(v.get('color'))==key(colour)]
         parts=list(dict.fromkeys(parts+same))
     return colour,parts,bool(any(p.casefold() in by_sku for p in parts))
 
@@ -55,6 +56,8 @@ def sanmar_colour_alias(value):
     """Known SanMar label abbreviations; not a fuzzy or substring matcher."""
     key = colour_key(value)
     aliases = {
+        'athletic grey*': 'athletic grey',
+        'deep heather*': 'deep heather',
         'charcoal hthr': 'charcoal heather',
         'hthr cardinal': 'heather cardinal',
         'hthr forest': 'heather forest',
@@ -96,6 +99,11 @@ def associate_sanmar_images(images, variants, product_sku):
         explicit_parts = bool(parts)
         explicit_colour = image.get('source_color') or image.get('color') or image.get('part_color')
         if not style or explicit_parts or usable(explicit_colour):
+            if style:
+                colour, linked_parts, linked = resolved_links(
+                    image, variants, colour_normalizer=sanmar_colour_alias)
+                if linked:
+                    image.update(source_color=colour, source_part_ids=linked_parts)
             result.append(image)
             continue
         try:
@@ -145,4 +153,5 @@ def matcher_runtime():
     digest = hashlib.sha256()
     for function in (colour_key, usable, resolved_links, sanmar_colour_alias, associate_sanmar_images):
         digest.update(marshal.dumps(portable(function.__code__)))
-    return {'version': 'sanmar-colour-alias-v1', 'code_sha256': digest.hexdigest()}
+    return {'version': 'sanmar-colour-alias-v2', 'code_sha256': digest.hexdigest()}
+

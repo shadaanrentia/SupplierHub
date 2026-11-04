@@ -96,9 +96,43 @@ class ImageTests(unittest.TestCase):
     def test_other_style_not_associated(self):
         result = media.associate_sanmar_images([{'url': 'https://media.sanmarcanada.com/catalog/product/a/ATC5050_Black.jpg'}], [{'variant_sku': 'a', 'color': 'Black'}], 'ATC8001L')
         self.assertFalse(result[0].get('source_part_ids'))
+    def test_marker_parts_expand_across_all_sizes(self):
+        variants = [{'variant_sku': sku, 'color': colour, 'inventory': 0}
+                    for sku, colour in [('23424-1', 'Athletic Grey'), ('23424-2', 'Athletic Grey*'),
+                                        ('23424-3', 'Athletic Grey'), ('23424-4', 'Athletic Grey'),
+                                        ('23424-5', 'Athletic Grey'), ('23425-1', 'Athletic Grey*'),
+                                        ('23426-2', 'Athletic Grey'), ('23427-3', 'Athletic Grey*')]]
+        original = {'source_part_ids': '["23424-2"]', 'source_color': 'Athletic Grey*'}
+        result = media.associate_sanmar_images([original], variants, 'ATC8001L')[0]
+        self.assertEqual(set(result['source_part_ids']), {v['variant_sku'] for v in variants})
+        self.assertEqual(original['source_part_ids'], '["23424-2"]')
+    def test_verified_colour_only_marker_expands(self):
+        variants = [{'variant_sku': 'a', 'color': 'Athletic Grey'},
+                    {'variant_sku': 'b', 'color': 'Athletic Grey*'}]
+        image = {'source_color': 'Athletic Grey*'}
+        self.assertEqual(set(media.associate_sanmar_images([image], variants, 'ATC8001L')[0]['source_part_ids']), {'a', 'b'})
+    def test_deep_heather_marker_expands_verified_parts(self):
+        variants = [{'variant_sku': '28398-3', 'color': 'Deep Heather'},
+                    {'variant_sku': '28398-4', 'color': 'Deep Heather*'},
+                    {'variant_sku': '28398-5', 'color': 'Deep Heather'}]
+        image = {'source_part_ids': ['28398-4']}
+        result = media.associate_sanmar_images([image], variants, 'ATC8001L')[0]
+        self.assertEqual(set(result['source_part_ids']), {v['variant_sku'] for v in variants})
+    def test_conflicting_part_colour_does_not_expand(self):
+        variants = [{'variant_sku': 'a', 'color': 'Black'}, {'variant_sku': 'b', 'color': 'Athletic Grey'}]
+        image = {'source_part_ids': ['a'], 'source_color': 'Athletic Grey*'}
+        self.assertEqual(media.associate_sanmar_images([image], variants, 'ATC8001L')[0], image)
+    def test_unknown_marker_is_not_stripped(self):
+        self.assertNotEqual(media.sanmar_colour_alias('Black*'), media.sanmar_colour_alias('Black'))
+    def test_default_resolver_preserves_exact_colour_contract(self):
+        variants = [{'variant_sku': 'a', 'color': 'Athletic Grey*'},
+                    {'variant_sku': 'b', 'color': 'Athletic Grey'}]
+        self.assertEqual(media.resolved_links({'source_part_ids': ['a']}, variants)[1], ['a'])
+
     def test_runtime_fingerprint_present(self):
         result = media.matcher_runtime()
-        self.assertEqual(result['version'], 'sanmar-colour-alias-v1')
+        self.assertEqual(result['version'], 'sanmar-colour-alias-v2')
         self.assertEqual(len(result['code_sha256']), 64)
 
 if __name__ == '__main__': unittest.main()
+
