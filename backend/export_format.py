@@ -25,6 +25,8 @@ def product_title(name, sku=''):
     # Preserve intentional mixed-case branding; normalize shouting supplier titles.
     if value == value.upper():
         value = value.lower().title()
+    from catalogue_labels import full_product_name
+    value = full_product_name(value, sku)
     value = re.sub(r"\b[A-Za-z]+\b", lambda m: ACRONYMS.get(m.group().lower(), m.group()), value)
     if sku and value.casefold() != sku.casefold():
         value = f'{value} {sku}'.strip()
@@ -90,3 +92,4 @@ def inventory_quantity(row):
     except (ValueError, TypeError, OverflowError):
         raise ValueError('Unknown, invalid or fractional inventory for ' + str(row.get('variant_sku') or row.get('sku') or 'variant') + '; no stock update sent')
     return int(number)
+

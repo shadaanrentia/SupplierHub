@@ -1,3 +1,4 @@
+from catalogue_labels import display_product_labels, display_variant_labels
 """Product routes: list, detail, selection, bulk ops, delete."""
 import json
 import logging
@@ -235,7 +236,7 @@ async def get_products(
         )
         products = []
         for row in rows:
-            product = row_to_dict(row)
+            product = display_product_labels(row_to_dict(row))
             if product.get("thumbnail"):
                 product["image"] = product["thumbnail"]
             elif product.get("thumbnail_base64"):
@@ -297,7 +298,7 @@ async def get_product(
                 status_code=404,
                 detail="Product not found"
             )
-        product = row_to_dict(row)
+        product = display_product_labels(row_to_dict(row))
         variant_rows = await conn.fetch(
             """
             SELECT *
@@ -339,7 +340,7 @@ async def get_product(
         )
         from inventory_selection import select_inventory
         variants = select_inventory(variants, preferred_warehouse, strict=False)
-        product["variants"] = variants
+        product["variants"] = [display_variant_labels(v) for v in variants]
         product["media"] = media
         product["preferred_warehouse"] = preferred_warehouse
         return product
@@ -408,5 +409,6 @@ async def delete_all_products(user: dict = Depends(get_admin_user)):
         await conn.execute("DELETE FROM product_media")
         await conn.execute("DELETE FROM products")
         return {"status": "deleted", "count": count}
+
 
 
