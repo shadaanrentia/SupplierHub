@@ -131,3 +131,18 @@ def associate_sanmar_images(images, variants, product_sku):
         result.append(image)
     return result
 
+
+
+def matcher_runtime():
+    """Identify the matcher loaded by this worker without exposing server paths."""
+    import hashlib
+    import marshal
+    from types import CodeType
+    def portable(code):
+        return code.replace(co_filename='media_links.py',
+                            co_consts=tuple(portable(value) if isinstance(value, CodeType) else value
+                                            for value in code.co_consts))
+    digest = hashlib.sha256()
+    for function in (colour_key, usable, resolved_links, sanmar_colour_alias, associate_sanmar_images):
+        digest.update(marshal.dumps(portable(function.__code__)))
+    return {'version': 'sanmar-colour-alias-v1', 'code_sha256': digest.hexdigest()}

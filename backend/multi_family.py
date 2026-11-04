@@ -32,7 +32,9 @@ def verify_group_destination(family, expected_skus, found, destination, expected
         reasons.append('SKUs outside this group: ' + ', '.join(outside[:8]))
     if conflicting_ids:
         reasons.append('SKU searches found members in another family: ' + ', '.join(conflicting_ids[:4]))
-    if not saved_verified and family.get('name') != expected_name:
+    # A complete, exact SKU set identifies a renamed family independently of its title.
+    complete_sku_match = bool(expected) and set(remote) == expected
+    if not saved_verified and not complete_sku_match and family.get('name') != expected_name:
         reasons.append('expected name=' + repr(expected_name) + '; actual name=' + repr(family.get('name')))
     if not remote:
         reasons.append('destination family has no identifiable members')
@@ -237,6 +239,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
             return {'success':False,'error':str(exc),'completed_groups':completed}
         finally:
             await conn.execute('SELECT pg_advisory_unlock(hashtext($1))',lock)
+
 
 
 

@@ -60,11 +60,12 @@ def verify_owner(family, product, variants):
     from export_safety import export_name
     name = export_name(product['product_name'], product['supplier_sku'])
     allowed = {name, str(product['product_name']), name + ' — Group 01', str(product['product_name']) + ' — Group 01'}
-    if family.get('name') not in allowed:
-        raise ValueError('Existing family name does not match this SupplierHub product; no changes made')
-    remote = members(family)
-    if not set(remote).issubset({sku(v) for v in variants}):
-        raise ValueError('Family contains other SKUs; automatic migration is blocked')
+    expected = {sku(v) for v in variants}
+    remote = members(family, expected_skus=expected)
+    if not remote or not set(remote).issubset(expected):
+        raise ValueError('Family contains other or missing SKUs; automatic migration is blocked')
+    if family.get('name') not in allowed and set(remote) != expected:
+        raise ValueError('Renamed family has an incomplete SKU match; automatic adoption is blocked')
     return remote
 
 
@@ -316,7 +317,9 @@ def expand_colour_links(images, variants):
 async def repair_assets(ls, destination, images, variants=None, remote_snapshot=None):
     from image_auto import sync_images, read_bytes, retry_read
     assert_service_compatible(ls)
-    totals = {'uploaded':0,'skipped':0,'failed':0,'uncertain':0,'messages':[]}
+    from media_links import matcher_runtime
+    totals = {'uploaded':0,'skipped':0,'failed':0,'uncertain':0,'messages':[],
+              'image_matcher': matcher_runtime()}
     async with deps.pool.acquire() as conn:
         row = await conn.fetchrow('SELECT product_id FROM lightspeed_family_exports WHERE store_domain=$1 AND destination_id=$2', ls.domain_prefix, destination)
         group = await conn.fetchrow('SELECT product_id,variant_ids FROM lightspeed_export_groups WHERE store_domain=$1 AND lightspeed_product_id=$2', ls.domain_prefix, destination)
@@ -421,6 +424,7 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
     if totals['failed'] or totals['uncertain']:
         totals['messages'].append('Images pending; retry Sync Selected to reconcile without recreating variants')
     return totals
+
 
 
 
