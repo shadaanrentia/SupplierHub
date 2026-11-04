@@ -59,7 +59,8 @@ def verify_member_inventory(response, product_id, outlet_id, expected_quantity):
         raise ValueError('Inventory readback did not include outlet inventories')
     matches = [i for i in entries if isinstance(i, dict) and str(i.get('outlet_id') or '') == str(outlet_id)]
     if len(matches) != 1:
-        raise ValueError('Inventory readback needs exactly one record for the selected outlet')
+        raise ValueError('Inventory readback needs exactly one record for the selected outlet; '
+                         + f'product={product_id}, outlet={outlet_id}, expected={expected}, matching_records={len(matches)}')
     actual = quantity(matches[0].get('current_amount'))
     if actual != expected:
         raise ValueError(f'Inventory mismatch for {product_id} at outlet {outlet_id}: expected {expected}, received {actual}')
@@ -87,7 +88,7 @@ def verify_legacy_inventory(response, product_id, outlet_id, expected_quantity):
 
 def read_inventory_for_verification(service, product_id, outlet_id, expected_quantity):
     """Read modern inventory, falling back to the dedicated inventory read only
-    when the correctly identified modern product omits its inventory field.
+    when the identified modern product omits inventory or the selected outlet.
     No write is repeated and a real quantity mismatch cannot use fallback.
     """
     response = service.family_request('GET', f'products/{product_id}')
@@ -95,7 +96,15 @@ def read_inventory_for_verification(service, product_id, outlet_id, expected_qua
     if not isinstance(row, dict) or str(row.get('id') or '') != str(product_id):
         return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
     if 'outlet_inventories' in row:
-        return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
+        entries = row['outlet_inventories']
+        if not isinstance(entries, list):
+            return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
+        matches = [entry for entry in entries if isinstance(entry, dict)
+                   and str(entry.get('outlet_id') or '') == str(outlet_id)]
+        # A missing outlet in product metadata is not conclusive stock evidence.
+        # Use the dedicated stock read; duplicates and actual mismatches still fail.
+        if matches:
+            return verify_member_inventory(response, product_id, outlet_id, expected_quantity)
     # Product resources may omit stock. Read the documented inventory resource.
     service._throttle()
     inventory_response = service._http_session().get(
@@ -127,8 +136,10 @@ def verify_inventory_records(records, product_id, outlet_id, expected_quantity):
         if str(row.get('outlet_id') or '') == str(outlet_id):
             matches.append(row)
     if len(matches) != 1:
-        raise ValueError('Inventory readback needs exactly one record for the selected outlet')
+        raise ValueError('Inventory readback needs exactly one record for the selected outlet; '
+                         + f'product={product_id}, outlet={outlet_id}, expected={expected}, matching_records={len(matches)}')
     actual = quantity(matches[0].get('current_inventory_level'))
     if actual != expected:
         raise ValueError(f'Inventory mismatch for {product_id} at outlet {outlet_id}: expected {expected}, received {actual}')
     return True
+
