@@ -1,4 +1,5 @@
 """Independent size families; verified ownership, durable writes and safe resumption."""
+from sync_context import defer_images
 import asyncio
 import json
 import math
@@ -50,7 +51,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
     assert_service_compatible(ls)
     from export_safety import decode, validate_prices, LIMIT
     validate_prices(product, variants)
-    if not any(i.get('media_type','image') == 'image' and (i.get('url') or i.get('image_base64')) for i in images):
+    if not defer_images.get() and not any(i.get('media_type','image') == 'image' and (i.get('url') or i.get('image_base64')) for i in images):
         raise ValueError('No usable source images; refresh supplier media')
     for variant in variants:
         try:
@@ -239,6 +240,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
             return {'success':False,'error':str(exc),'completed_groups':completed}
         finally:
             await conn.execute('SELECT pg_advisory_unlock(hashtext($1))',lock)
+
 
 
 

@@ -1,3 +1,4 @@
+import { LightspeedSyncProvider } from '@/components/LightspeedSync';
 import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { LayoutDashboard, Package, Truck, RefreshCw, Settings, ChevronLeft, ChevronRight, Layers, Users, LogOut, User, Search, FolderTree, Zap } from "lucide-react";
@@ -28,7 +29,7 @@ export default function Layout({ user, onLogout }) {
   const navItems = getNavItems(user?.role === "admin");
 
   return (
-    <div className="flex h-screen bg-[#09090B] text-zinc-100 font-body">
+    <LightspeedSyncProvider><div className="flex h-screen bg-[#09090B] text-zinc-100 font-body">
       <aside
         className={cn(
           "flex flex-col border-r border-zinc-800 bg-[#09090B] transition-all duration-200 shrink-0",
@@ -117,10 +118,11 @@ export default function Layout({ user, onLogout }) {
         </button>
       </aside>
 
-      <main className="flex-1 overflow-auto">
+      <main className="flex-1 overflow-auto pb-28">
         <Outlet />
       </main>
-    </div>
+    </div></LightspeedSyncProvider>
   );
 }
+
 

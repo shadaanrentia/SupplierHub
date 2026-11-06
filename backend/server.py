@@ -349,12 +349,16 @@ async def startup():
     await apply_schedule_from_settings()
 
     await start_category_refresh()
+    from lightspeed_jobs import start_worker
+    await start_worker()
 
 
 @app.on_event("shutdown")
 async def shutdown():
     from scheduler import shutdown_scheduler
 
+    from lightspeed_jobs import stop_worker
+    await stop_worker()
     shutdown_scheduler()
     await stop_category_refresh()
 
@@ -398,16 +402,18 @@ from routes.lightspeed import (
 from routes.categories import router as categories_router
 from routes.taxonomy import router as taxonomy_router
 from taxonomy_extensions import router as taxonomy_extensions_router
+from lightspeed_jobs import router as lightspeed_jobs_router
 from routes.preprocessing import router as preprocessing_router
 from routes.media import router as media_router
 from routes.export_review import router as export_review_router
 
 for r in [auth_router, suppliers_router, products_router, dashboard_router,
           settings_router, sync_router, odoo_router, lightspeed_router,
-          categories_router, taxonomy_router,taxonomy_extensions_router, preprocessing_router, media_router, export_review_router]:
+          categories_router, taxonomy_router,taxonomy_extensions_router, preprocessing_router, media_router, export_review_router, lightspeed_jobs_router]:
     app.include_router(r)
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
+

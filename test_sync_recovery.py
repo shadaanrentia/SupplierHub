@@ -131,8 +131,9 @@ class ImageTests(unittest.TestCase):
 
     def test_runtime_fingerprint_present(self):
         result = media.matcher_runtime()
-        self.assertEqual(result['version'], 'sanmar-colour-alias-v2')
+        self.assertEqual(result['version'], 'sanmar-colour-alias-v3')
         self.assertEqual(len(result['code_sha256']), 64)
 
 if __name__ == '__main__': unittest.main()
+
 

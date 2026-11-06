@@ -1,3 +1,4 @@
+import { useLightspeedSync } from '@/components/LightspeedSync';
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
@@ -111,6 +112,7 @@ function ProductImage({
 
 export default function Products() {
   const navigate = useNavigate();
+  const {showHistory} = useLightspeedSync();
 
   const [products, setProducts] = useState([]);
   const [total, setTotal] = useState(0);
@@ -800,6 +802,7 @@ export default function Products() {
               </Button>
             )}
 
+            <Button variant="outline" size="sm" onClick={()=>showHistory(null)}>Lightspeed sync history</Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -1005,6 +1008,7 @@ export default function Products() {
                             )}
                             Sync Media
                           </DropdownMenuItem>
+                          <DropdownMenuItem onClick={()=>showHistory(product.id,product.product_name)}>Lightspeed sync history</DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </div>
@@ -1132,6 +1136,7 @@ export default function Products() {
                 <p className="text-xs font-mono text-zinc-500">
                   {product.supplier_sku}
                 </p>
+                <button className="mt-1 text-xs text-blue-400 hover:underline" onClick={event=>{event.stopPropagation();showHistory(product.id,product.product_name);}}>Lightspeed sync history</button>
               </div>
 
               <div className="text-right shrink-0">
@@ -1335,4 +1340,5 @@ export default function Products() {
     </div>
   );
 }
+
 

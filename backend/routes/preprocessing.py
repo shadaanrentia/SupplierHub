@@ -2,6 +2,7 @@
 import json
 from export_safety import validate_prices, export_name
 from product_readiness import load_readiness, public_state
+from category_scope import destination_labels, in_category, category_rows
 from size_order import size_key
 from fastapi import Query
 import logging
@@ -18,9 +19,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 
-async def catalog(conn, search='', supplier_id=None, lightweight=False):
+async def catalog(conn, search='', supplier_id=None, lightweight=False, product_ids=None):
     columns = 'p.id,p.product_name,p.supplier_sku,p.supplier_id,p.category,p.brand,p.base_price,p.price_needs_review,p.lightspeed_sync_status,p.lightspeed_product_id,p.updated_at' if lightweight else 'p.*'
-    return [row_to_dict(r) for r in await conn.fetch(f"SELECT {columns},s.supplier_name FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE (p.product_name ILIKE $1 OR p.supplier_sku ILIKE $1) AND ($2::varchar IS NULL OR p.supplier_id=$2) ORDER BY p.updated_at DESC,p.id", '%'+search.strip()+'%', supplier_id)]
+    return [row_to_dict(r) for r in await conn.fetch(f"SELECT {columns},s.supplier_name FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE (p.product_name ILIKE $1 OR p.supplier_sku ILIKE $1) AND ($2::varchar IS NULL OR p.supplier_id=$2) AND ($3::varchar[] IS NULL OR p.id=ANY($3)) ORDER BY p.updated_at DESC,p.id", '%'+search.strip()+'%', supplier_id, product_ids)]
 
 
 def measurement_summary(variants, fallback):
@@ -49,22 +50,17 @@ async def policy_catalog(conn,supplier_id=None):
     products=await catalog(conn,supplier_id=supplier_id,lightweight=True)
     states=await load_readiness(conn,products,include_assets=False)
     rules=await category_policies(conn)
-    entries={}
-    nodes=await conn.fetch("""SELECT d.supplier_id,d.path,d.category_id,COALESCE(n.data,c.data) AS data FROM supplier_taxonomy_destinations d
-        LEFT JOIN supplier_taxonomy_nodes n ON n.supplier_id=d.supplier_id AND n.path=d.path
-        LEFT JOIN supplier_taxonomy_custom_nodes c ON c.supplier_id=d.supplier_id AND c.path=d.path
+    labels=await destination_labels(conn)
+    entries=category_rows(products,states,labels)
+    nodes=await conn.fetch("""SELECT d.supplier_id,d.path,d.category_id FROM supplier_taxonomy_destinations d
         WHERE d.store_domain=$1 AND ($2::varchar IS NULL OR d.supplier_id=$2)""",domain,supplier_id)
     for row in nodes:
-        node=json.loads(row['data']) if isinstance(row['data'],str) else row['data']
-        if not node:continue
-        if node.get('leaf') and node.get('verified'):
-            entries[(row['supplier_id'],str(row['category_id']))]={'supplier_id':row['supplier_id'],'category_id':str(row['category_id']),'path':row['path'],'category_name':row['path'],'product_count':0}
-    for product in products:
-        state=states[product['id']];cid=state['mapped_lightspeed_category_id']
-        if not cid:continue
-        key=(product['supplier_id'],str(cid))
-        if key not in entries:entries[key]={'supplier_id':key[0],'category_id':key[1],'path':state.get('mapped_category_name') or product.get('category'),'category_name':state.get('mapped_category_name') or product.get('category'),'product_count':0}
-        entries[key]['product_count']+=1
+        key=(row['supplier_id'],str(row['category_id']))
+        if not row['category_id']:continue
+        item=entries.setdefault(key,{'supplier_id':key[0],'category_id':key[1],
+            'category_name':labels.get(key[1]) or 'Lightspeed category name unavailable',
+            'path':labels.get(key[1]) or '', 'product_count':0,'supplier_categories':[], 'supplier_paths':[]})
+        if row['path'] not in item['supplier_paths']:item['supplier_paths'].append(row['path'])
     for key,item in entries.items():
         rule=rules.get(key,{})
         item.update(mode=rule.get('pricing_mode') or 'global',value=rule.get('pricing_value'),**{k:rule.get(k) for k in ('weight_lb','length_in','width_in','height_in')})
@@ -83,7 +79,7 @@ async def get_category_policies(supplier_id: str=None,user=Depends(get_current_u
 
 
 @router.get('/preprocessing/products')
-async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(50,ge=1,le=100), status: str=None, search: str='', supplier_id: str=None, user: dict=Depends(get_current_user)):
+async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(50,ge=1,le=100), status: str=None, search: str='', supplier_id: str=None, category_id: str=None, user: dict=Depends(get_current_user)):
     request_started=time.perf_counter()
     await ensure_pricing_schema()
     if status not in (None,'all','ready','invalid','synced','images_pending'): raise HTTPException(400,'Unknown status filter')
@@ -111,7 +107,7 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
     for product in products:
         state=states[product['id']]
         product=apply_category_policy(product,state['mapped_lightspeed_category_id'],policies)
-        if state['excluded_from_queue']: continue
+        if state['excluded_from_queue'] or not in_category(state,category_id): continue
         if status not in (None,'all') and state['status']!=status: continue
         product.update(public_state(state))
         product['can_update']=bool(state['is_valid'] and state['status']=='synced')
@@ -144,7 +140,7 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
 
 
 @router.get('/preprocessing/ready-ids')
-async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id: str=None, include_synced: bool=False, user: dict=Depends(get_current_user)):
+async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id: str=None, include_synced: bool=False, category_id: str=None, user: dict=Depends(get_current_user)):
     await ensure_pricing_schema()
     if status not in (None,'all','ready','invalid','synced','images_pending'): raise HTTPException(400,'Unknown status filter')
     async with deps.pool.acquire() as conn:
@@ -156,7 +152,7 @@ async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id:
     selected=[];selectable=[]
     for product in products:
         state=states[product['id']]
-        if state['excluded_from_queue'] or (status not in (None,'all') and state['status']!=status): continue
+        if not in_category(state,category_id) or state['excluded_from_queue'] or (status not in (None,'all') and state['status']!=status): continue
         product=apply_category_policy(product,state['mapped_lightspeed_category_id'],policies)
         try: pricing_summary(product,state['variants'],markup)
         except ValueError: continue
@@ -167,11 +163,11 @@ async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id:
 
 
 @router.get('/preprocessing/summary')
-async def get_preprocessing_summary(supplier_id: str=None, user: dict=Depends(get_current_user)):
+async def get_preprocessing_summary(supplier_id: str=None, category_id: str=None, user: dict=Depends(get_current_user)):
     async with deps.pool.acquire() as conn:
         products=await catalog(conn,supplier_id=supplier_id,lightweight=True)
         states=await load_readiness(conn,products,include_assets=False)
-    products=[p for p in products if not states[p['id']]['excluded_from_queue']]
+    products=[p for p in products if not states[p['id']]['excluded_from_queue'] and in_category(states[p['id']],category_id)]
     values=[states[p['id']] for p in products]; total=len(values)
     mapped=sum(bool(s['mapped_lightspeed_category_id']) for s in values)
     with_images=sum(bool(s['images_count']) for s in values)
@@ -363,8 +359,13 @@ async def recorded_export(ls,product,variants,images,markup,category_id):
     return result
 
 
-@router.post('/preprocessing/sync-to-lightspeed')
+@router.post('/preprocessing/sync-to-lightspeed', status_code=202)
 async def sync_preprocessed_to_lightspeed(data: dict=None, user: dict=Depends(get_current_user)):
+    from lightspeed_jobs import enqueue
+    return await enqueue(data or {}, user)
+
+
+async def sync_products_now(data: dict=None, user: dict=None):
     await ensure_pricing_schema()
     from routes.lightspeed import _get_ls_service
     from export_safety import export_product
@@ -378,7 +379,7 @@ async def sync_preprocessed_to_lightspeed(data: dict=None, user: dict=Depends(ge
         settings=await conn.fetchrow("SELECT markup_percentage FROM settings WHERE id='system_settings'")
         markup=float(settings['markup_percentage']) if settings and settings['markup_percentage'] is not None else 40.0
         if supplier_id and not await conn.fetchval('SELECT 1 FROM suppliers WHERE id=$1',supplier_id):raise HTTPException(404,'Supplier not found')
-        candidates=await catalog(conn,supplier_id=supplier_id,lightweight=True)
+        candidates=await catalog(conn,supplier_id=supplier_id,lightweight=True,product_ids=selected or None)
         if selected and set(selected)-{p['id'] for p in candidates}:raise HTTPException(400,'Selected products do not belong to the selected supplier or no longer exist')
         if selected: candidates=[p for p in candidates if p['id'] in selected]
         states=await load_readiness(conn,candidates,include_assets=False)
@@ -395,6 +396,7 @@ async def sync_preprocessed_to_lightspeed(data: dict=None, user: dict=Depends(ge
                 state=(await load_readiness(conn,[product]))[product['id']]
             if supplier_id and product.get('supplier_id') != supplier_id: raise ValueError('Product supplier changed; reload Pre-processing')
             if not can_export_selected(state,bool(selected)): raise ValueError('; '.join(state['validation_errors']) or 'Already synced')
+            if not in_category(state,(data or {}).get('category_id')): raise ValueError('Product mapping changed; no longer in the selected Lightspeed category')
             product['lightspeed_category_id']=state['mapped_lightspeed_category_id']
             # Full Sync Selected must reconcile destinations even when only images were pending.
             # Image-only repair remains an explicit Export Review action.
@@ -452,6 +454,7 @@ async def preview_product_for_odoo(product_id: str, user: dict = Depends(get_cur
         }
         preview['validation']={'is_valid':readiness['is_valid'],'errors':readiness['validation_errors']}
         return preview
+
 
 
 

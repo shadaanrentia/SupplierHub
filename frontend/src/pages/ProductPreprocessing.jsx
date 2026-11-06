@@ -1,3 +1,4 @@
+import { useLightspeedSync } from '@/components/LightspeedSync';
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import axios from "../lib/axios";
 import { toast } from "sonner";
@@ -30,11 +31,23 @@ export default function ProductPreprocessing() {
   const [products, setProducts] = useState([]);
   const [summary, setSummary] = useState(null);
   const [suppliers,setSuppliers]=useState([]);
-  const [supplierId,setSupplierId]=useState('all');
+  const [supplierId,setSupplierId]=useState(()=>new URLSearchParams(window.location.search).get('supplier_id') || 'all');
+  const [categoryId,setCategoryId]=useState(()=>new URLSearchParams(window.location.search).get('category_id') || 'all');
+  const [categories,setCategories]=useState([]),[categoryError,setCategoryError]=useState('');
+  useEffect(()=>{
+    const controller=new AbortController();setCategories([]);setCategoryError('');
+    axios.get(`${API}/category-policies`,{params:supplierId==='all'?{}:{supplier_id:supplierId},signal:controller.signal}).then(({data})=>{
+      if(controller.signal.aborted)return;
+      const grouped=new Map();
+      for(const row of data.categories||[]){const previous=grouped.get(row.category_id);grouped.set(row.category_id,{...row,product_count:(previous?.product_count||0)+row.product_count});}
+      setCategories([...grouped.values()].sort((a,b)=>a.category_name.localeCompare(b.category_name)));
+    }).catch(e=>{if(!controller.signal.aborted)setCategoryError('Could not load Lightspeed categories. Refresh this page to retry.');});
+    return()=>controller.abort();
+  },[supplierId]);
   useEffect(()=>{axios.get(`${API}/suppliers`).then(r=>setSuppliers(Array.isArray(r.data)?r.data:r.data.suppliers || [])).catch(()=>toast.error('Could not load suppliers'));},[]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [syncing, setSyncing] = useState(false);
+  const {start:startLightspeedSync,starting:syncing} = useLightspeedSync();
   const [selectedProducts, setSelectedProducts] = useState(new Set());
   const [readyIds, setReadyIds] = useState([]);
   const [readyLoading, setReadyLoading] = useState(true);
@@ -47,7 +60,7 @@ export default function ProductPreprocessing() {
   const requestVersion = useRef(0);
   const summaryVersion = useRef(0);
   useEffect(() => { const timer=setTimeout(() => {setSearchQuery(search);setPage(1);},250); return () => clearTimeout(timer); }, [search]);
-  useEffect(() => {setSelectedProducts(new Set());},[searchQuery,statusFilter,supplierId]);
+  useEffect(() => {setSelectedProducts(new Set());},[searchQuery,statusFilter,supplierId,categoryId]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -63,6 +76,7 @@ export default function ProductPreprocessing() {
     try {
       const params = new URLSearchParams({ page, limit, search: searchQuery });
       if(supplierId!=='all') params.append('supplier_id',supplierId);
+      if(categoryId!=='all') params.append('category_id',categoryId);
       if (statusFilter !== "all") {
         params.append("status", statusFilter);
       }
@@ -80,7 +94,7 @@ export default function ProductPreprocessing() {
     } finally {
       if(version===requestVersion.current) {setLoading(false);setReadyLoading(false);}
     }
-  }, [page, statusFilter, searchQuery,supplierId]);
+  }, [page, statusFilter, searchQuery,supplierId,categoryId]);
 
   const readySelectedCount=readyIds.filter(id=>selectedProducts.has(id)).length;
   const allReadySelected=readyIds.length>0 && readySelectedCount===readyIds.length;
@@ -89,12 +103,12 @@ export default function ProductPreprocessing() {
   const fetchSummary = useCallback(async () => {
     const version=++summaryVersion.current;
     try {
-      const res = await axios.get(`${API}/preprocessing/summary`,{params:supplierId==='all'?{}:{supplier_id:supplierId}});
+      const res = await axios.get(`${API}/preprocessing/summary`,{params:{supplier_id:supplierId==='all'?undefined:supplierId,category_id:categoryId==='all'?undefined:categoryId}});
       if(version===summaryVersion.current) setSummary(res.data);
     } catch (e) {
       console.error("Failed to load summary");
     }
-  }, [supplierId]);
+  }, [supplierId,categoryId]);
 
   useEffect(() => {fetchProducts();}, [fetchProducts]);
   useEffect(() => {fetchSummary();}, [fetchSummary]);
@@ -127,58 +141,18 @@ export default function ProductPreprocessing() {
     }
   };
 
-  const syncEndpoint = "sync-to-lightspeed";
-  const platformLabel = "Lightspeed";
-
+  const platformLabel = 'Lightspeed';
+  const scope = {supplier_id:supplierId==='all'?null:supplierId,category_id:categoryId==='all'?null:categoryId};
   const syncSelected = async () => {
-    if (selectedProducts.size === 0) {
-      toast.error("No products selected");
-      return;
-    }
-    setSyncing(true);
-    try {
-      const res = await axios.post(`${API}/preprocessing/${syncEndpoint}`, {
-        product_ids: Array.from(selectedProducts), supplier_id:supplierId==='all'?null:supplierId
-      });
-      if (res.data.synced > 0) {
-        toast.success(`Synced ${res.data.synced} products to ${platformLabel}`);
-      }
-      if (res.data.failed > 0) {
-        toast.error(`Failed to sync ${res.data.failed} products`);
-      }
-      if(res.data.images_pending || res.data.needs_review) toast.warning(`${res.data.images_pending || res.data.needs_review} products have images pending; inspect Export Review`);
-      if(res.data.skipped) toast.info(`${res.data.skipped} products skipped: not eligible for this operation`);
-      if(res.data.errors?.length) toast.error(res.data.errors[0].error);
-      setSelectedProducts(new Set());
-      fetchProducts();
-      fetchSummary();
-    } catch (e) {
-      toast.error(e.response?.data?.detail || `Sync to ${platformLabel} failed`);
-    } finally {
-      setSyncing(false);
-    }
+    if(!selectedProducts.size)return;
+    try {await startLightspeedSync({...scope,product_ids:Array.from(selectedProducts)});setSelectedProducts(new Set());}
+    catch (_) { /* The global monitor reports request errors. */ }
   };
-
   const syncAll = async () => {
-    setSyncing(true);
-    try {
-      const res = await axios.post(`${API}/preprocessing/${syncEndpoint}`, { sync_all: true, supplier_id:supplierId==='all'?null:supplierId });
-      if (res.data.synced > 0) {
-        toast.success(`Synced ${res.data.synced} products to ${platformLabel}`);
-      }
-      if (res.data.failed > 0) {
-        toast.error(`Failed to sync ${res.data.failed} products`);
-      }
-      if(res.data.images_pending || res.data.needs_review) toast.warning(`${res.data.images_pending || res.data.needs_review} products have images pending; inspect Export Review`);
-      if(res.data.errors?.length) toast.error(res.data.errors[0].error);
-      fetchProducts();
-      fetchSummary();
-    } catch (e) {
-      toast.error(e.response?.data?.detail || `Sync to ${platformLabel} failed`);
-    } finally {
-      setSyncing(false);
-    }
+    try {await startLightspeedSync({...scope,sync_all:true,search:searchQuery,status:statusFilter});}
+    catch (_) { /* The global monitor reports request errors. */ }
   };
+  useEffect(()=>{const refresh=()=>{fetchProducts();fetchSummary();};window.addEventListener('lightspeed-sync-updated',refresh);return()=>window.removeEventListener('lightspeed-sync-updated',refresh);},[fetchProducts,fetchSummary]);
 
   const previewProductData = async (productId) => {
     const version=++previewRequest.current;
@@ -334,7 +308,7 @@ export default function ProductPreprocessing() {
               Products
             </CardTitle>
             <div className="pp-filters flex flex-wrap items-center gap-3">
-              <Select disabled={syncing} value={supplierId} onValueChange={value=>{setSupplierId(value);setPage(1);setSelectedProducts(new Set());}}>
+              <Select disabled={syncing} value={supplierId} onValueChange={value=>{setSupplierId(value);setCategoryId('all');setPage(1);setSelectedProducts(new Set());}}>
                 <SelectTrigger aria-label="Supplier filter" className="w-48 bg-zinc-800 border-zinc-700"><SelectValue placeholder="All suppliers" /></SelectTrigger>
                 <SelectContent className="bg-zinc-900 border-zinc-800"><SelectItem value="all">All suppliers</SelectItem>{suppliers.map(s=><SelectItem key={s.id} value={s.id}>{s.supplier_name}</SelectItem>)}</SelectContent>
               </Select>
@@ -351,6 +325,8 @@ export default function ProductPreprocessing() {
                   <SelectItem value="synced">Synced</SelectItem>
                 </SelectContent>
               </Select>
+              <select aria-label="Lightspeed category" disabled={syncing} value={categoryId} onChange={e=>{setCategoryId(e.target.value);setPage(1);setSelectedProducts(new Set());}} className="max-w-full rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm"><option value="all">All Lightspeed categories</option>{categories.map(category=><option key={category.category_id} value={category.category_id}>{category.category_name} ({category.product_count})</option>)}</select>
+              {categoryError&&<p role="alert" className="text-xs text-red-300">{categoryError}</p>}
               <input aria-label="Search preprocessing products" placeholder="Search product name or SKU" value={search} disabled={syncing} onChange={event=>setSearch(event.target.value)} className="pp-search bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
               <Button disabled={loading || syncing || readyLoading || !!readyError || !readyIds.length} aria-label="Select eligible products matching these filters" variant="outline" size="sm" onClick={selectAllVisible}>
                 {statusFilter==='synced'?'Select synced':'Select all eligible'}
@@ -529,7 +505,7 @@ export default function ProductPreprocessing() {
                 data-testid="sync-all-btn"
               >
                 {syncing ? <RefreshCw className="w-4 h-4 animate-spin mr-2" /> : <ArrowRight className="w-4 h-4 mr-2" />}
-                {supplierId==='all'?'Sync All Ready':`Sync ${suppliers.find(s=>s.id===supplierId)?.supplier_name || 'Supplier'} Ready`} to {platformLabel}
+                {categoryId!=='all'?'Sync Category Ready':supplierId==='all'?'Sync All Ready':`Sync ${suppliers.find(s=>s.id===supplierId)?.supplier_name || 'Supplier'} Ready`} to {platformLabel}
               </Button>
             </div>
           </div>
@@ -666,6 +642,7 @@ export default function ProductPreprocessing() {
     </div>
   );
 }
+
 
 
 

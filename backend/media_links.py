@@ -67,7 +67,12 @@ def sanmar_colour_alias(value):
         '~orange': 'orange',
         '~silver': 'silver',
     }
-    return aliases.get(key, key)
+    key = aliases.get(key, key)
+    components = {'wht':'white', 'whit':'white', 'trueroy':'true royal',
+                  'trueroyal':'true royal', 'truenavy':'true navy'}
+    if '/' in key:
+        key = '/'.join(components.get(part.strip(),part.strip()) for part in key.split('/'))
+    return key
 
 
 def associate_sanmar_images(images, variants, product_sku):
@@ -153,5 +158,6 @@ def matcher_runtime():
     digest = hashlib.sha256()
     for function in (colour_key, usable, resolved_links, sanmar_colour_alias, associate_sanmar_images):
         digest.update(marshal.dumps(portable(function.__code__)))
-    return {'version': 'sanmar-colour-alias-v2', 'code_sha256': digest.hexdigest()}
+    return {'version': 'sanmar-colour-alias-v3', 'code_sha256': digest.hexdigest()}
+
 

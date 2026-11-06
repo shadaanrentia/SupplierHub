@@ -1,4 +1,5 @@
 """Persistent export groups, image results, and last-valid supplier-price guards."""
+from sync_context import defer_images
 import asyncio
 import hashlib
 import json
@@ -145,7 +146,7 @@ async def _legacy_export_product(ls, product, variants, images, markup, category
         product, variants, markup = await prepare_export_pricing(pricing_conn, product, variants, markup)
     from export_format import inventory_quantity
     for variant in variants: inventory_quantity(variant)
-    if not any(i.get('media_type','image')=='image' and (i.get('url') or i.get('image_base64')) for i in images):
+    if not defer_images.get() and not any(i.get('media_type','image')=='image' and (i.get('url') or i.get('image_base64')) for i in images):
         raise ValueError('No source images; refresh supplier media and check Export Review')
     async with deps.pool.acquire() as conn:
         groups = [dict(r) for r in await conn.fetch('SELECT * FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2 ORDER BY group_number', product['id'],ls.domain_prefix)]
@@ -220,7 +221,8 @@ async def export_product(ls, product, variants, images, markup, category_id):
     from export_format import assert_service_compatible
     assert_service_compatible(ls)
     from routes.media import stored_export_images
-    images = await stored_export_images(product['id'], images)
+    if not defer_images.get():
+        images = await stored_export_images(product['id'], images)
     active = [
         dict(v) for v in variants
         if v.get("is_active") is not False
@@ -300,4 +302,5 @@ async def export_product(ls, product, variants, images, markup, category_id):
             return await _legacy_export_product(ls, product, variants, images, markup, category_id)
         finally:
             await conn.execute('SELECT pg_advisory_unlock(hashtext($1))', lock)
+
 

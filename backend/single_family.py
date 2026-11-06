@@ -1,4 +1,5 @@
 """Resumable batches into one family. Creation/addition POSTs are never blind-retried."""
+from sync_context import defer_images
 import asyncio
 import base64
 import json
@@ -106,7 +107,7 @@ async def export_one_family(ls, product, variants, images, markup, category_id):
     validate_prices(product, variants)
     if not variants or len({sku(v) for v in variants}) != len(variants) or any(not sku(v) for v in variants):
         raise ValueError('Missing/duplicate variant SKUs')
-    if not any(i.get('media_type', 'image') == 'image' and (i.get('url') or i.get('image_base64')) for i in images):
+    if not defer_images.get() and not any(i.get('media_type', 'image') == 'image' and (i.get('url') or i.get('image_base64')) for i in images):
         raise ValueError('No source images; refresh supplier media')
     variants = sort_variants(variants)
     key = product['id']; domain = ls.domain_prefix
@@ -315,6 +316,8 @@ def expand_colour_links(images, variants):
 
 
 async def repair_assets(ls, destination, images, variants=None, remote_snapshot=None):
+    if defer_images.get():
+        return {'uploaded':0,'skipped':0,'failed':0,'uncertain':0,'messages':[], 'deferred':True}
     from image_auto import sync_images, read_bytes, retry_read
     assert_service_compatible(ls)
     from media_links import matcher_runtime
@@ -424,6 +427,7 @@ async def repair_assets(ls, destination, images, variants=None, remote_snapshot=
     if totals['failed'] or totals['uncertain']:
         totals['messages'].append('Images pending; retry Sync Selected to reconcile without recreating variants')
     return totals
+
 
 
 

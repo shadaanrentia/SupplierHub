@@ -29,7 +29,7 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
     try: validate_prices(product, variants)
     except ValueError as exc: errors.append(str(exc))
     if not category_id: errors.append(category_error or 'Choose and publish a Lightspeed category in Category Mapping')
-    if not images: errors.append('No usable source images; refresh supplier media')
+    image_warnings = [] if images else ['No usable source images; refresh supplier media']
     for variant in variants:
         try:
             stock = float(variant.get('inventory'))
@@ -57,12 +57,12 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
         errors.append('More than 200 variants: preview and save size families in Export Review')
     # Remote image retries stay in Pre-processing; absent source images still block readiness.
     valid = not errors
-    pending = bool(image_issues) or product.get('lightspeed_sync_status') in ('images_pending','needs_review')
+    pending = bool(image_issues) or not images or product.get('lightspeed_sync_status') in ('images_pending','needs_review')
     synced = valid and product.get('lightspeed_sync_status') == 'synced'
     return {'excluded_from_queue': excluded, 'skipped_variants_count': skipped, 'validation_errors': errors, 'is_valid': valid, 'can_sync': valid and (not synced or pending),
             'status': 'invalid' if errors else ('images_pending' if pending else ('synced' if synced else 'ready')),
             'mapped_lightspeed_category_id': category_id, 'variants_count': len(variants),
-            'images_count': len(images), 'group_count': len(groups), 'plan_ready': plan_ready,
+            'image_warnings': image_warnings, 'images_count': len(images), 'group_count': len(groups), 'plan_ready': plan_ready,
             'needs_split': len(variants) > LIMIT and not plan_ready, 'image_review_count': image_issues,
             'previous_export_failed': product.get('lightspeed_sync_status') == 'failed'}
 
@@ -133,4 +133,5 @@ async def load_readiness(conn, products, include_assets=True):
 
 def public_state(state):
     return {k: v for k, v in state.items() if k not in ('variants', 'images')}
+
 
