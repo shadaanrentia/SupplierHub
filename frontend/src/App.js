@@ -1,8 +1,8 @@
-import "@/dashboard-graphs.css";
-import "@/catalogue-workspace.css";
-import "@/catalogue.css";
-import "@/workbench.css";
-import SyncHistory from "@/pages/SyncHistory";
+import "./dashboard-graphs.css";
+import "./catalogue-workspace.css";
+import "./catalogue.css";
+import "./workbench.css";
+import SyncHistory from "./pages/SyncHistory";
 import "@/App.css";
 import "@/lib/axios"; // Initialize axios interceptors
 import { useState, useEffect } from "react";
