@@ -313,8 +313,8 @@ async def get_lightspeed_categories(
 
     categories = row["categories"] if row else []
 
-    if isinstance(categories, str):
-        categories = json.loads(categories)
+    from category_tree import category_tree
+    categories = category_tree(categories)
 
     return {
         "success": True,

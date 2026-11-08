@@ -10,24 +10,35 @@ from deps import row_to_dict, new_id, utc_now, get_current_user, get_admin_user
 from models import ProductSelectRequest, BulkSelectRequest, BulkDeleteRequest
 router = APIRouter(prefix="/api")
 logger = logging.getLogger(__name__)
-@router.get("/products/categories")
-async def get_categories(supplier_id: Optional[str] = None, user: dict = Depends(get_current_user)):
+@router.get('/products/categories')
+async def get_categories(supplier_id: Optional[str]=None,user:dict=Depends(get_current_user)):
+    from catalog_filters import catalog_filter
+    where,args,_=catalog_filter({'supplier_id':supplier_id})
     async with deps.pool.acquire() as conn:
-        rows = await conn.fetch("""SELECT DISTINCT category FROM products
-            WHERE category IS NOT NULL AND BTRIM(category) != ''
-            AND ($1::text IS NULL OR supplier_id = $1)
-            ORDER BY category""", supplier_id if supplier_id and supplier_id != 'all' else None)
-        return {"categories": [r["category"] for r in rows]}
-@router.get("/products/brands")
-async def get_brands(supplier_id: Optional[str] = None, category: Optional[str] = None, user: dict = Depends(get_current_user)):
+        rows=await conn.fetch("SELECT DISTINCT CASE WHEN NULLIF(BTRIM(p.category),'') IS NULL OR LOWER(BTRIM(p.category))='uncategorized' THEN 'Uncategorized' ELSE BTRIM(p.category) END category FROM products p WHERE "+where+' ORDER BY category',*args)
+    return {'categories':[r['category'] for r in rows]}
+
+
+@router.get('/products/brands')
+async def get_brands(supplier_id:Optional[str]=None,category:Optional[str]=None,user:dict=Depends(get_current_user)):
+    from catalog_filters import catalog_filter
+    where,args,_=catalog_filter({'supplier_id':supplier_id,'category':category})
     async with deps.pool.acquire() as conn:
-        rows = await conn.fetch("""SELECT DISTINCT brand FROM products
-            WHERE brand IS NOT NULL AND BTRIM(brand) != ''
-            AND ($1::text IS NULL OR supplier_id = $1)
-            AND ($2::text IS NULL OR category = $2)
-            ORDER BY brand""", supplier_id if supplier_id and supplier_id != 'all' else None,
-            category if category and category != 'all' else None)
-        return {"brands": [r["brand"] for r in rows]}
+        rows=await conn.fetch("SELECT DISTINCT CASE WHEN NULLIF(BTRIM(p.brand),'') IS NULL OR LOWER(BTRIM(p.brand))='unbranded' THEN 'Unbranded' ELSE BTRIM(p.brand) END brand FROM products p WHERE "+where+' ORDER BY brand',*args)
+    return {'brands':[r['brand'] for r in rows]}
+
+
+@router.get('/products/filter-options')
+async def filter_options(supplier_id:Optional[str]=None,category:Optional[str]=None,brand:Optional[str]=None,user:dict=Depends(get_current_user)):
+    from catalog_filters import catalog_filter
+    from size_order import size_key
+    where,args,_=catalog_filter({'supplier_id':supplier_id,'category':category,'brand':brand})
+    async with deps.pool.acquire() as conn:
+        rows=await conn.fetch("""SELECT DISTINCT BTRIM(REGEXP_REPLACE(COALESCE(v.color,''),'^[~[:space:]]+','','g')) colour,
+            BTRIM(COALESCE(v.size,'')) size FROM product_variants v JOIN products p ON p.id=v.product_id WHERE """+where,*args)
+        unassigned=bool(await conn.fetchval('SELECT EXISTS(SELECT 1 FROM products p WHERE NOT EXISTS(SELECT 1 FROM suppliers s WHERE s.id=p.supplier_id))'))
+    return {'colours':sorted({r['colour'] for r in rows if r['colour']},key=str.casefold),
+            'sizes':sorted({r['size'] for r in rows if r['size']},key=size_key),'unassigned_supplier':unassigned}
 
 
 def build_supplier_workbook(rows):
@@ -78,7 +89,8 @@ async def export_supplier_products(supplier_id: str = Query(..., min_length=1), 
     from pricing_rules import ensure_pricing_schema, category_policies, apply_category_policy, pricing_policy, price_for
     from product_readiness import load_readiness
 
-    if supplier_id == 'all':
+    supplier_id=supplier_id.strip()
+    if not supplier_id or supplier_id in ('all','__unassigned__'):
         raise HTTPException(400, 'Select a supplier before exporting')
     await ensure_pricing_schema()
     async with deps.pool.acquire() as conn:
@@ -97,7 +109,7 @@ async def export_supplier_products(supplier_id: str = Query(..., min_length=1), 
             policies = await category_policies(conn)
             for offset in range(0, len(products), 200):
                 batch = products[offset:offset + 200]
-                states = await load_readiness(conn, batch)
+                states = await load_readiness(conn, batch, include_assets=False)
                 for product in batch:
                     product['export_cost'] = None
                     product['export_retail'] = None
@@ -129,58 +141,19 @@ async def get_products(
     search: Optional[str] = None,
     selected: Optional[bool] = None,
     odoo_status: Optional[str] = None,
+    images:str='', pricing:str='', stock:str='', colour:str='', size:str='',
+    price_min:Optional[float]=None, price_max:Optional[float]=None,
+    variants_min:Optional[int]=None, variants_max:Optional[int]=None,
+    updated_from:str='',updated_to:str='',sort:str='newest',
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
     user: dict = Depends(get_current_user)
 ):
     async with deps.pool.acquire() as conn:
-        conditions = []
-        values = []
-        param_idx = 1
-        if supplier_id:
-            conditions.append(f"p.supplier_id = ${param_idx}")
-            values.append(supplier_id)
-            param_idx += 1
-        if category and category != "all":
-            conditions.append(f"p.category = ${param_idx}")
-            values.append(category)
-            param_idx += 1
-        if brand and brand != "all":
-            conditions.append(f"p.brand = ${param_idx}")
-            values.append(brand)
-            param_idx += 1
-        if search:
-            conditions.append(f"(p.product_name ILIKE ${param_idx} OR p.supplier_sku ILIKE ${param_idx})")
-            values.append(f"%{search}%")
-            param_idx += 1
-        if selected is not None:
-            conditions.append(f"p.selected_for_odoo = ${param_idx}")
-            values.append(selected)
-            param_idx += 1
-        if odoo_status and odoo_status != "all":
-            conditions.append(f"p.odoo_sync_status = ${param_idx}")
-            values.append(odoo_status)
-            param_idx += 1
-        conditions.append("""
-            (
-                p.base_price IS NOT NULL
-                AND p.base_price > 0
-            )
-        """)
-        conditions.append("""
-            EXISTS (
-                SELECT 1
-                FROM product_media pm
-                WHERE pm.product_id = p.id
-                AND pm.media_type = 'image'
-                AND (
-                    (pm.url IS NOT NULL AND pm.url != '')
-                    OR
-                    (pm.image_base64 IS NOT NULL AND pm.image_base64 != '')
-                )
-            )
-        """)
-        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        from catalog_filters import catalog_filter, SAVED_INVENTORY
+        try:where_clause,values,order_by=catalog_filter(locals())
+        except ValueError as exc:raise HTTPException(400,str(exc)) from exc
+        param_idx=len(values)+1
         total = await conn.fetchval(
             f"""
             SELECT COUNT(*)
@@ -196,6 +169,7 @@ async def get_products(
             SELECT
                 p.*,
                 s.supplier_name,
+                {SAVED_INVENTORY} AS inventory_total,
                 (
                     SELECT '/api/media/' || pm.id || '/content'
                     FROM product_media pm
@@ -224,7 +198,7 @@ async def get_products(
             LEFT JOIN suppliers s
                 ON p.supplier_id = s.id
             WHERE {where_clause}
-            ORDER BY p.created_at DESC
+            ORDER BY {order_by}
             LIMIT ${limit_param}
             OFFSET ${offset_param}
         """
@@ -412,3 +386,40 @@ async def delete_all_products(user: dict = Depends(get_admin_user)):
 
 
 
+
+
+
+@router.get('/products/{product_id}/workbench')
+async def product_workbench(product_id: UUID, user: dict=Depends(get_current_user)):
+    """Saved supplier data plus computed export values; no live destination writes."""
+    from pricing_rules import ensure_pricing_schema, category_policies, apply_category_policy, pricing_policy, price_for
+    from product_readiness import load_readiness, public_state
+    from category_scope import destination_labels
+    from shipping_measurements import source_measurements
+    product = await get_product(product_id,user)
+    from product_history import mississauga_inventory
+    product['variants'] = mississauga_inventory(product['variants'],product.get('preferred_warehouse'))
+    product['preferred_warehouse'] = 'MISSISSAUGA/ON'
+    await ensure_pricing_schema()
+    async with deps.pool.acquire() as conn:
+        state=(await load_readiness(conn,[product]))[product['id']]
+        labels=await destination_labels(conn)
+        product=apply_category_policy(product,state['mapped_lightspeed_category_id'],await category_policies(conn))
+        markup=await conn.fetchval("SELECT markup_percentage FROM settings WHERE id='system_settings'")
+        product['readiness']=public_state(state)
+        product['lightspeed_category_name']=labels.get(str(state['mapped_lightspeed_category_id']))
+        try:
+            policy=pricing_policy(product,state['variants'],markup if markup is not None else 40)
+            product['computed_base_retail']=price_for(policy['anchor_cost'],policy)
+        except ValueError as exc:
+            policy=None;product['pricing_error']=str(exc)
+        for variant in product['variants']:
+            try:variant['computed_retail']=price_for(variant.get('price'),policy) if policy else None
+            except ValueError:variant['computed_retail']=None
+            try:variant['export_measurements']=source_measurements({**variant,'category_shipping':product['category_shipping']})
+            except ValueError as exc:variant['measurement_error']=str(exc)
+
+    return product
+
+from product_history import router as product_history_router
+router.include_router(product_history_router)

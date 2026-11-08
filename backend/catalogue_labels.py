@@ -30,8 +30,8 @@ def full_product_name(value, supplier_sku=''):
     return re.sub(r'\s+', ' ', text).strip()
 
 def full_colour_name(value):
-    text = re.sub(r'\s+', ' ', str(value or '')).strip()
-    return COLOUR_ALIASES.get(text.casefold(), text)
+    text = re.sub(r'\s+', ' ', re.sub(r'^[\s~]+', '', str(value or ''))).strip()
+    return COLOUR_ALIASES.get(text.casefold(), COLOUR_ALIASES.get('~'+text.casefold(), text))
 
 def display_product_labels(row):
     from export_format import product_title

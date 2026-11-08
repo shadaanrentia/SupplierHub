@@ -1,3 +1,5 @@
+import SearchField from '@/components/SearchField';
+import {ProductLink,useProductDetails} from "@/components/ProductDetails";
 import { useLightspeedSync } from '@/components/LightspeedSync';
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import axios from "../lib/axios";
@@ -6,17 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { Button } from "../components/ui/button";
 import { Checkbox } from "../components/ui/checkbox";
 import { Badge } from "../components/ui/badge";
-import { 
-  RefreshCw, Package, DollarSign, CheckCircle, XCircle, 
-  AlertTriangle, Eye, Upload, Calculator, Layers, Image,
-  ArrowRight, Filter, Zap
-} from "lucide-react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "../components/ui/dialog";
+import { RefreshCw, Package, CheckCircle, AlertTriangle, Eye, Upload, Calculator, Layers, Image, ArrowRight, Filter } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -28,19 +20,23 @@ import {
 const API = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "") + "/api";
 
 export default function ProductPreprocessing() {
+  const previewProductData=useProductDetails();
   const [products, setProducts] = useState([]);
   const [summary, setSummary] = useState(null);
   const [suppliers,setSuppliers]=useState([]);
-  const [supplierId,setSupplierId]=useState(()=>new URLSearchParams(window.location.search).get('supplier_id') || 'all');
+  const [supplierId,setSupplierId]=useState(()=>new URLSearchParams(window.location.search).get('supplier_id') || '');
   const [categoryId,setCategoryId]=useState(()=>new URLSearchParams(window.location.search).get('category_id') || 'all');
   const [categories,setCategories]=useState([]),[categoryError,setCategoryError]=useState('');
   useEffect(()=>{
     const controller=new AbortController();setCategories([]);setCategoryError('');
-    axios.get(`${API}/category-policies`,{params:supplierId==='all'?{}:{supplier_id:supplierId},signal:controller.signal}).then(({data})=>{
+    if(!supplierId)return()=>controller.abort();
+    axios.get(`${API}/preprocessing/categories`,{params:supplierId==='all'?{}:{supplier_id:supplierId},signal:controller.signal}).then(({data})=>{
       if(controller.signal.aborted)return;
       const grouped=new Map();
       for(const row of data.categories||[]){const previous=grouped.get(row.category_id);grouped.set(row.category_id,{...row,product_count:(previous?.product_count||0)+row.product_count});}
-      setCategories([...grouped.values()].sort((a,b)=>a.category_name.localeCompare(b.category_name)));
+      const choices=[...grouped.values()].sort((a,b)=>a.category_name.localeCompare(b.category_name));
+      setCategories(choices);
+      setCategoryId(current=>current==='all'||choices.some(c=>c.category_id===current)?current:choices.some(c=>c.category_id==='__unmapped__')?'__unmapped__':'all');
     }).catch(e=>{if(!controller.signal.aborted)setCategoryError('Could not load Lightspeed categories. Refresh this page to retry.');});
     return()=>controller.abort();
   },[supplierId]);
@@ -52,24 +48,20 @@ export default function ProductPreprocessing() {
   const [readyIds, setReadyIds] = useState([]);
   const [readyLoading, setReadyLoading] = useState(true);
   const [readyError, setReadyError] = useState('');
-  const [previewProduct, setPreviewProduct] = useState(null);
-  const [showPreview, setShowPreview] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState(()=>new URLSearchParams(window.location.search).get("search") || "");
   const [searchQuery, setSearchQuery] = useState(()=>new URLSearchParams(window.location.search).get("search") || "");
   const requestVersion = useRef(0);
   const summaryVersion = useRef(0);
-  useEffect(() => { const timer=setTimeout(() => {setSearchQuery(search);setPage(1);},250); return () => clearTimeout(timer); }, [search]);
   useEffect(() => {setSelectedProducts(new Set());},[searchQuery,statusFilter,supplierId,categoryId]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const previewRequest = useRef(0);
   const syncPlatform = "lightspeed";
   const limit = 25;
 
   const fetchProducts = useCallback(async () => {
     const version=++requestVersion.current;
+    if(!supplierId){setProducts([]);setTotal(0);setReadyIds([]);setLoading(false);setReadyLoading(false);return;}
     setLoading(true);
     setLoadError('');
     setReadyLoading(true);setReadyError('');setReadyIds([]);
@@ -102,6 +94,7 @@ export default function ProductPreprocessing() {
 
   const fetchSummary = useCallback(async () => {
     const version=++summaryVersion.current;
+    if(!supplierId){setSummary(null);return;}
     try {
       const res = await axios.get(`${API}/preprocessing/summary`,{params:{supplier_id:supplierId==='all'?undefined:supplierId,category_id:categoryId==='all'?undefined:categoryId}});
       if(version===summaryVersion.current) setSummary(res.data);
@@ -114,6 +107,7 @@ export default function ProductPreprocessing() {
   useEffect(() => {fetchSummary();}, [fetchSummary]);
 
   const recalculatePrices = async () => {
+    if(!supplierId){toast.error('Choose a supplier first');return;}
     setLoading(true);
     try {
       const res = await axios.post(`${API}/preprocessing/recalculate-prices`);
@@ -127,6 +121,7 @@ export default function ProductPreprocessing() {
   };
 
   const validateProducts = async () => {
+    if(!supplierId){toast.error('Choose a supplier first');return;}
     setLoading(true);
     try {
       const productIds = selectedProducts.size > 0 ? Array.from(selectedProducts) : [];
@@ -144,29 +139,17 @@ export default function ProductPreprocessing() {
   const platformLabel = 'Lightspeed';
   const scope = {supplier_id:supplierId==='all'?null:supplierId,category_id:categoryId==='all'?null:categoryId};
   const syncSelected = async () => {
+    if(!supplierId){toast.error('Choose a supplier first');return;}
     if(!selectedProducts.size)return;
     try {await startLightspeedSync({...scope,product_ids:Array.from(selectedProducts)});setSelectedProducts(new Set());}
     catch (_) { /* The global monitor reports request errors. */ }
   };
   const syncAll = async () => {
+    if(!supplierId){toast.error('Choose a supplier first');return;}
     try {await startLightspeedSync({...scope,sync_all:true,search:searchQuery,status:statusFilter});}
     catch (_) { /* The global monitor reports request errors. */ }
   };
   useEffect(()=>{const refresh=()=>{fetchProducts();fetchSummary();};window.addEventListener('lightspeed-sync-updated',refresh);return()=>window.removeEventListener('lightspeed-sync-updated',refresh);},[fetchProducts,fetchSummary]);
-
-  const previewProductData = async (productId) => {
-    const version=++previewRequest.current;
-    setPreviewProduct(null); setPreviewLoading(true); setShowPreview(true);
-    try {
-      const res = await axios.get(`${API}/preprocessing/product/${productId}/preview`);
-      if(version!==previewRequest.current) return;
-      setPreviewProduct(res.data);
-    } catch (e) {
-      if(version===previewRequest.current) toast.error("Failed to load preview");
-    } finally {
-      if(version===previewRequest.current) setPreviewLoading(false);
-    }
-  };
 
   const toggleProductSelection = (productId) => {
     setSelectedProducts(prev => {
@@ -309,8 +292,8 @@ export default function ProductPreprocessing() {
             </CardTitle>
             <div className="pp-filters flex flex-wrap items-center gap-3">
               <Select disabled={syncing} value={supplierId} onValueChange={value=>{setSupplierId(value);setCategoryId('all');setPage(1);setSelectedProducts(new Set());}}>
-                <SelectTrigger aria-label="Supplier filter" className="w-48 bg-zinc-800 border-zinc-700"><SelectValue placeholder="All suppliers" /></SelectTrigger>
-                <SelectContent className="bg-zinc-900 border-zinc-800"><SelectItem value="all">All suppliers</SelectItem>{suppliers.map(s=><SelectItem key={s.id} value={s.id}>{s.supplier_name}</SelectItem>)}</SelectContent>
+                <SelectTrigger aria-label="Supplier filter" className="w-48 bg-zinc-800 border-zinc-700"><SelectValue placeholder="Choose a supplier" /></SelectTrigger>
+                <SelectContent className="bg-zinc-900 border-zinc-800">{suppliers.map(s=><SelectItem key={s.id} value={s.id}>{s.supplier_name}</SelectItem>)}</SelectContent>
               </Select>
               <Select disabled={syncing} value={statusFilter} onValueChange={value=>{setStatusFilter(value);setPage(1);}}>
                 <SelectTrigger className="w-40 bg-zinc-800 border-zinc-700">
@@ -327,7 +310,8 @@ export default function ProductPreprocessing() {
               </Select>
               <select aria-label="Lightspeed category" disabled={syncing} value={categoryId} onChange={e=>{setCategoryId(e.target.value);setPage(1);setSelectedProducts(new Set());}} className="max-w-full rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm"><option value="all">All Lightspeed categories</option>{categories.map(category=><option key={category.category_id} value={category.category_id}>{category.category_name} ({category.product_count})</option>)}</select>
               {categoryError&&<p role="alert" className="text-xs text-red-300">{categoryError}</p>}
-              <input aria-label="Search preprocessing products" placeholder="Search product name or SKU" value={search} disabled={syncing} onChange={event=>setSearch(event.target.value)} className="pp-search bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
+              {categories.some(c=>!c.category_available)&&<p className="category-remap-note">Some products need a current category. <a className="text-blue-400" href={`/category-mapping?supplier_id=${encodeURIComponent(supplierId)}`}>Review mappings</a></p>}
+              <SearchField aria-label="Search preprocessing products" placeholder="Search product name or SKU" value={search} disabled={syncing} onChange={event=>{setSearch(event.target.value);setSearchQuery(event.target.value);setPage(1);}} className="pp-search bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
               <Button disabled={loading || syncing || readyLoading || !!readyError || !readyIds.length} aria-label="Select eligible products matching these filters" variant="outline" size="sm" onClick={selectAllVisible}>
                 {statusFilter==='synced'?'Select synced':'Select all eligible'}
               </Button>
@@ -382,14 +366,14 @@ export default function ProductPreprocessing() {
                         </td>
                         <td className="py-2 px-3">
                           <div>
-                            <p title={product.product_name || product.supplier_sku} className="pp-product-name text-zinc-100 font-medium">
+                            <ProductLink productId={product.id} title={product.product_name || product.supplier_sku} className="pp-product-name font-medium">
                               {product.product_name || product.supplier_sku}
-                            </p>
+                            </ProductLink>
                             <p className="pp-product-meta"><span>{product.supplier_sku}</span><span>{product.supplier_name || 'Unknown supplier'}</span></p>
                           </div>
                         </td>
                         <td className="py-2 px-3">
-                          {product.mapped_lightspeed_category_id ? (
+                          {product.mapped_lightspeed_category_id && product.category_available!==false ? (
                             <Badge variant="outline" className="pp-category bg-emerald-950/40 text-emerald-400 border-emerald-800">
                               {product.lightspeed_category_name || "Mapped · name unavailable"}
                             </Badge>
@@ -466,8 +450,8 @@ export default function ProductPreprocessing() {
             <div className="text-center py-10 text-zinc-500">
               <Package className="w-12 h-12 mx-auto mb-4 opacity-50" />
               <p>No products found</p>
-              <p className="text-sm mt-1">{search || statusFilter!=='all'?'Try a different search or status.':'Import products from your supplier to get started.'}</p>
-              {(search || statusFilter!=='all') && <button className="pp-edit-pricing" onClick={()=>{setSearch('');setStatusFilter('all');setPage(1);}}>Clear filters</button>}
+              <p className="text-sm mt-1">{!supplierId?'Choose a supplier above to load its products.':search || statusFilter!=='all'?'Try a different search or status.':'Import products from your supplier to get started.'}</p>
+              {(search || statusFilter!=='all') && <button className="pp-edit-pricing" onClick={()=>{setSearch('');setSearchQuery('');setStatusFilter('all');setPage(1);}}>Clear filters</button>}
             </div>
           )}
         </CardContent>
@@ -491,7 +475,7 @@ export default function ProductPreprocessing() {
               <span className="text-sm text-zinc-400">Lightspeed</span>
               <Button 
                 onClick={syncSelected}
-                disabled={syncing || loading || !!loadError || selectedProducts.size === 0}
+                disabled={!supplierId || syncing || loading || !!loadError || selectedProducts.size === 0}
                 className="bg-blue-600 hover:bg-blue-700"
                 data-testid="sync-selected-btn"
               >
@@ -500,7 +484,7 @@ export default function ProductPreprocessing() {
               </Button>
               <Button 
                 onClick={syncAll}
-                disabled={syncing || loading || !!loadError}
+                disabled={!supplierId || syncing || loading || !!loadError}
                 variant="outline"
                 data-testid="sync-all-btn"
               >
@@ -512,136 +496,11 @@ export default function ProductPreprocessing() {
         </CardContent>
       </Card>
 
-      {/* Preview Dialog */}
-      <Dialog open={showPreview} onOpenChange={open=>{setShowPreview(open);if(!open){previewRequest.current++;setPreviewLoading(false);}}}>
-        <DialogContent className="bg-zinc-900 border-zinc-800 max-w-3xl max-h-[80vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Product Preview</DialogTitle>
-          </DialogHeader>
-          {previewLoading && <p role="status" className="text-zinc-400 py-6">Loading product…</p>}
-          {!previewLoading && !previewProduct && <p role="alert" className="text-zinc-400 py-6">Preview could not be loaded. Close and try again.</p>}
-          {previewProduct && (
-            <div className="space-y-6 py-4">
-              {/* Product Template */}
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-400 mb-2">Product Details</h3>
-                <div className="bg-zinc-800/50 rounded-lg p-4 space-y-2">
-                  <div className="flex justify-between">
-                    <span className="text-zinc-500">Name:</span>
-                    <span className="text-zinc-100">{previewProduct.product_template.name}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-zinc-500">SKU:</span>
-                    <span className="font-mono text-zinc-100">{previewProduct.product_template.default_code}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-zinc-500">Category:</span>
-                    <span className={previewProduct.product_template.categ_id ? "text-green-400" : "text-red-400"}>
-                      {previewProduct.product_template.category_name}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-zinc-500">Supplier Price (before markup):</span>
-                    <span className="font-mono text-zinc-400">{formatPrice(previewProduct.product_template.standard_price)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-zinc-500">Retail Price (after markup):</span>
-                    <span className="font-mono text-green-400 font-bold">{formatPrice(previewProduct.product_template.list_price)}</span>
-                  </div>
-                </div>
-              </div>
 
-              {/* Attributes */}
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-400 mb-2">Attributes</h3>
-                <div className="bg-zinc-800/50 rounded-lg p-4 grid grid-cols-2 gap-4">
-                  <div>
-                    <p className="text-xs text-zinc-500 mb-1">Colors ({previewProduct.attributes.colors.length})</p>
-                    <div className="flex flex-wrap gap-1">
-                      {previewProduct.attributes.colors.slice(0, 10).map((c, i) => (
-                        <Badge key={i} variant="outline" className="text-xs">{c}</Badge>
-                      ))}
-                      {previewProduct.attributes.colors.length > 10 && (
-                        <Badge variant="outline" className="text-xs">+{previewProduct.attributes.colors.length - 10} more</Badge>
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-xs text-zinc-500 mb-1">Sizes ({previewProduct.attributes.sizes.length})</p>
-                    <div className="flex flex-wrap gap-1">
-                      {previewProduct.attributes.sizes.map((s, i) => (
-                        <Badge key={i} variant="outline" className="text-xs">{s}</Badge>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Variants */}
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-400 mb-2">Variants ({previewProduct.variants.length})</h3>
-                <div className="bg-zinc-800/50 rounded-lg p-4 max-h-40 overflow-y-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="text-zinc-500">
-                        <th className="text-left py-1">SKU</th>
-                        <th className="text-left py-1">Color</th>
-                        <th className="text-left py-1">Size</th>
-                        <th className="text-right py-1">Supplier price</th>
-                        <th className="text-right py-1">Retail price</th>
-                        <th className="text-right py-1">Stock</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {previewProduct.variants.slice(0, 20).map((v, i) => (
-                        <tr key={i} className="text-zinc-300">
-                          <td className="py-1 font-mono">{v.sku}</td>
-                          <td className="py-1">{v.color || '--'}</td>
-                          <td className="py-1">{v.size || '--'}</td>
-                          <td className="py-1 text-right">{formatPrice(v.price)}</td>
-                          <td className="py-1 text-right">{formatPrice(v.retail_price)}</td>
-                          <td className="py-1 text-right">{v.inventory}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {previewProduct.variants.length > 20 && (
-                    <p className="text-xs text-zinc-500 mt-2">... and {previewProduct.variants.length - 20} more variants</p>
-                  )}
-                </div>
-              </div>
-
-              {/* Validation */}
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-400 mb-2">Validation</h3>
-                <div className={`rounded-lg p-4 ${previewProduct.validation.is_valid ? 'bg-green-900/20' : 'bg-red-900/20'}`}>
-                  {previewProduct.validation.is_valid ? (
-                    <div className="flex items-center gap-2 text-green-400">
-                      <CheckCircle className="w-5 h-5" />
-                      <span>Product is valid and ready for sync</span>
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="flex items-center gap-2 text-red-400 mb-2">
-                        <XCircle className="w-5 h-5" />
-                        <span>Product has validation errors</span>
-                      </div>
-                      <ul className="list-disc list-inside text-sm text-red-300">
-                        {previewProduct.validation.errors.map((err, i) => (
-                          <li key={i}>{err}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
+
 
 
 

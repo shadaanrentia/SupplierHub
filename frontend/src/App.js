@@ -1,3 +1,8 @@
+import "@/dashboard-graphs.css";
+import "@/catalogue-workspace.css";
+import "@/catalogue.css";
+import "@/workbench.css";
+import SyncHistory from "@/pages/SyncHistory";
 import "@/App.css";
 import "@/lib/axios"; // Initialize axios interceptors
 import { useState, useEffect } from "react";
@@ -31,6 +36,7 @@ function PageTitle() {
       "/product-search": "Product Search",
       "/suppliers": "Suppliers",
       "/sync": "Sync Jobs",
+      "/sync-history": "Sync History",
       "/category-mapping": "Category Mapping",
       "/preprocessing": "Pre-processing",
       "/export-review": "Export Review",
@@ -102,6 +108,7 @@ function App() {
               <Route path="/product-search" element={<ProductSearch />} />
               <Route path="/suppliers" element={<Suppliers />} />
               <Route path="/sync" element={<SyncManagement />} />
+              <Route path="/sync-history" element={<SyncHistory />} />
               <Route path="/category-mapping" element={<CategoryMapping />} />
               <Route path="/export-review" element={<ExportReview />} />
               <Route path="/preprocessing" element={<ProductPreprocessing />} />
@@ -121,3 +128,4 @@ function App() {
 }
 
 export default App;
+

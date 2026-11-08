@@ -92,11 +92,10 @@ async def create_or_update_mapping(data: dict, user: dict = Depends(get_current_
                 raise HTTPException(400, "Category does not belong to this supplier's imported products")
             if cid and await conn.fetchval("SELECT to_regclass('public.lightspeed_category_snapshots')"):
                 snapshot = await conn.fetchval("SELECT categories FROM lightspeed_category_snapshots WHERE store_domain=$1", domain.lower())
-                if snapshot:
-                    snapshot = json.loads(snapshot) if isinstance(snapshot,str) else snapshot
-                    parents = {str(c.get('parent_id')) for c in snapshot if c.get('parent_id')}
-                    if not any(str(c.get('lightspeed_category_id'))==cid and cid not in parents for c in snapshot):
-                        raise HTTPException(400, "Refresh Lightspeed categories and choose an available final category")
+                from category_tree import category_tree
+                snapshot = category_tree(snapshot or [])
+                if not any(c['lightspeed_category_id']==cid and c['leaf_category'] and c['hierarchy_valid'] for c in snapshot):
+                    raise HTTPException(400, "Refresh Lightspeed categories and choose an available final category")
             async with conn.transaction():
                 await conn.execute("""INSERT INTO supplier_category_links
                     (id,supplier_id,store_domain,supplier_category_name,lightspeed_category_id,odoo_category_id,lightspeed_override)

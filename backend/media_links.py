@@ -8,7 +8,7 @@ def usable(value):
 
 
 def colour_key(value):
-    return re.sub(r'\s+', ' ', str(value or '').strip()).casefold()
+    return re.sub(r'\s+', ' ', re.sub(r'^[\s~]+', '', str(value or ''))).strip().casefold()
 
 
 def xml_links(element):
@@ -35,7 +35,7 @@ def resolved_links(item, variants, colour_normalizer=None):
         parts=parsed if isinstance(parsed,list) else [parts]
     parts=list(dict.fromkeys(str(x).strip() for x in parts if usable(x))) if isinstance(parts,list) else []
     colour=str(item.get('color') or item.get('source_color') or item.get('part_color') or '').strip()
-    if not usable(colour): colour=''
+    if not usable(colour) or not usable(key(colour)): colour=''
     by_sku={str(v.get('variant_sku') or '').strip().casefold():v for v in variants}
     matched=[by_sku[p.casefold()] for p in parts if p.casefold() in by_sku]
     known_colours={key(v.get('color')) for v in matched if key(v.get('color'))}
@@ -158,6 +158,6 @@ def matcher_runtime():
     digest = hashlib.sha256()
     for function in (colour_key, usable, resolved_links, sanmar_colour_alias, associate_sanmar_images):
         digest.update(marshal.dumps(portable(function.__code__)))
-    return {'version': 'sanmar-colour-alias-v3', 'code_sha256': digest.hexdigest()}
+    return {'version': 'generic-colour-prefix-v4', 'code_sha256': digest.hexdigest()}
 
 

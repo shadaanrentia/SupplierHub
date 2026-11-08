@@ -46,22 +46,43 @@ def fingerprint(product, variants):
     return hashlib.sha256(json.dumps([product['id'],product.get('lightspeed_product_id'),[(v['id'],v['variant_sku'],v.get('color'),v.get('size')) for v in variants], 'size_families'],sort_keys=True).encode()).hexdigest()
 
 
-@router.get('/products')
-async def products(search: str='', oversized: bool=False, issues_only: bool=True, page: int=Query(1,ge=1), user=Depends(get_current_user)):
+async def _review_listing(search, oversized, issues_only, page, supplier_id=None):
+    """Read list summaries without loading image binaries or full asset metadata."""
     async with deps.pool.acquire() as conn:
-        rows=[row_to_dict(r) for r in await conn.fetch("SELECT p.*,s.supplier_name FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id WHERE p.product_name ILIKE $1 OR p.supplier_sku ILIKE $1 ORDER BY p.supplier_sku,p.id",'%'+search.strip()+'%')]
-        states=await load_readiness(conn,rows)
-    result=[]
-    for product in rows:
-        state=states[product['id']]
-        if state['excluded_from_queue']: continue
-        if oversized and state['variants_count']<=LIMIT: continue
-        if issues_only and state['is_valid'] and not state['previous_export_failed'] and state.get('status') != 'images_pending': continue
-        product.update(public_state(state))
-        product['product_name']=export_name(product.get('product_name'),product.get('supplier_sku'))
-        product.update(variant_count=state['variants_count'],image_count=state['images_count'])
-        result.append(product)
-    return {'products':result[(page-1)*50:page*50],'page':page,'total':len(result)}
+        rows=[row_to_dict(r) for r in await conn.fetch("""SELECT
+            p.id,p.supplier_id,p.supplier_sku,p.product_name,p.base_price,p.brand,p.category,
+            p.lightspeed_product_id,p.lightspeed_sync_status,p.price_needs_review,s.supplier_name
+            FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id
+            WHERE (p.product_name ILIKE $1 OR p.supplier_sku ILIKE $1)
+            AND ($2::text IS NULL OR p.supplier_id=$2)
+            AND (NOT $3::boolean OR (SELECT COUNT(*) FROM product_variants v
+                 WHERE v.product_id=p.id AND v.is_active IS DISTINCT FROM FALSE)>=200)
+            ORDER BY p.supplier_sku,p.id""",'%'+search.strip()+'%',supplier_id if supplier_id and supplier_id!='all' else None,oversized)]
+        visible=[];total=0;start=(page-1)*50
+        for offset in range(0,len(rows),100):
+            batch=rows[offset:offset+100]
+            states=await load_readiness(conn,batch,include_assets=False)
+            for product in batch:
+                state=states[product['id']]
+                if oversized and state['variants_count']<LIMIT:continue
+                if issues_only and state['is_valid'] and not state['previous_export_failed'] and state.get('status')!='images_pending':continue
+                if start<=total<start+50:
+                    product.update(public_state(state))
+                    product['product_name']=export_name(product.get('product_name'),product.get('supplier_sku'))
+                    product.update(variant_count=state['variants_count'],image_count=state['images_count'])
+                    visible.append(product)
+                total+=1
+            # Release each batch's variant dictionaries before the next read.
+            del states
+    return {'products':visible,'page':page,'total':total}
+
+
+@router.get('/products')
+async def products(search: str='', oversized: bool=True, issues_only: bool=False, page: int=Query(1,ge=1), supplier_id:str=None, user=Depends(get_current_user)):
+    try:
+        return await asyncio.wait_for(_review_listing(search,oversized,issues_only,page,supplier_id),timeout=25)
+    except asyncio.TimeoutError:
+        raise HTTPException(503,'Export Review listing exceeded its read time limit. Check backend/database load and retry; no products were changed.')
 
 
 @router.get('/products/{product_id}')
