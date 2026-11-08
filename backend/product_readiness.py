@@ -99,8 +99,6 @@ async def load_readiness(conn, products, include_assets=True):
     image_issues = defaultdict(int)
     if remote_ids:
         for r in await conn.fetch("SELECT destination_id,COUNT(*) AS count FROM lightspeed_export_image_results WHERE store_domain=$1 AND destination_id=ANY($2::text[]) AND status!='uploaded' GROUP BY destination_id", domain, remote_ids): image_issues[str(r['destination_id'])] = r['count']
-    from category_scope import destination_labels
-    labels = await destination_labels(conn)
     results = {}
     for product in products:
         pid, supplier = product['id'], product.get('supplier_id')
@@ -129,17 +127,11 @@ async def load_readiness(conn, products, include_assets=True):
         destinations_for_product = {str(g['lightspeed_product_id']) for g in groups[pid] if g.get('lightspeed_product_id')}
         if product.get('lightspeed_product_id'): destinations_for_product.add(str(product['lightspeed_product_id']))
         state = evaluate(product, variants[pid], images[pid], groups[pid], category_id, error, sum(image_issues[i] for i in destinations_for_product))
-        missing = bool(category_id) and str(category_id) not in labels
-        state['category_available'] = not missing
-        if missing:
-            state['validation_errors'].append('The saved Lightspeed category is absent from the current category cache. Refresh categories and review this mapping.')
-            state.update(is_valid=False,can_sync=False,status='invalid')
         results[pid] = {**state, 'mapped_category_name':label, 'variants': sort_variants(eligible_variants(variants[pid])), 'images': [i for i in images[pid] if str(i.get('url') or '').strip()]}
     return results
 
 
 def public_state(state):
     return {k: v for k, v in state.items() if k not in ('variants', 'images')}
-
 
 

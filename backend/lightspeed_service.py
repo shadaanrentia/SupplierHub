@@ -406,11 +406,7 @@ class LightspeedService:
             parents = {str(c['parent_id']) for c in result if c['parent_id']}
             for cat in result:
                 cat['leaf_category'] = cat['lightspeed_category_id'] not in parents
-            from category_tree import category_tree
-            normalized=category_tree(result)
-            if any(not row['hierarchy_valid'] for row in normalized):
-                raise ValueError('Incomplete or cyclic Lightspeed category hierarchy; refresh did not replace the saved snapshot')
-            return {'success': True, 'categories': normalized}
+            return {'success': True, 'categories': result}
         except Exception as exc:
             logger.warning('Lightspeed category read failed: %s', type(exc).__name__)
             return {'success': False, 'error': str(exc), 'categories': []}

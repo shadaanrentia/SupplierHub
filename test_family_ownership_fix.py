@@ -23,11 +23,8 @@ class Tests(unittest.TestCase):
   self.assertEqual(list(self.check(f)),['source-1'])
  def test_unrelated_sku_still_blocked(self):
   with self.assertRaisesRegex(ValueError,'SKUs outside this group: other'):self.check(self.family(sku='other'))
- def test_exact_sku_set_recovers_renamed_family(self):
-  self.assertEqual(list(self.check(self.family(name='Different'))),['source-1'])
- def test_incomplete_sku_evidence_cannot_claim_renamed_family(self):
-  with self.assertRaisesRegex(ValueError,"expected name=.*actual name='Different'"):
-   self.check(self.family(name='Different'),expected_skus=['source-1','source-2'])
+ def test_wrong_name_still_blocked_with_evidence(self):
+  with self.assertRaisesRegex(ValueError,"Group 1; family=family-1; expected name=.*actual name='Different'"):self.check(self.family(name='Different'))
  def test_found_members_across_families_blocked(self):
   with self.assertRaisesRegex(ValueError,'another family: other-member'):self.check(found={'source-1':{'id':'other-member'}})
  def test_verified_saved_member_allows_rename(self):self.assertTrue(self.check(self.family(name='Renamed'),destination='member-1'))
@@ -46,4 +43,3 @@ class Tests(unittest.TestCase):
   f=self.family();f['products'][0].pop('id')
   with self.assertRaises(ValueError):self.check(f)
 if __name__=='__main__':unittest.main()
-
