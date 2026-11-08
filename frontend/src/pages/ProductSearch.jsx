@@ -1,3 +1,4 @@
+import {ProductLink} from "@/components/ProductDetails";
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
@@ -6,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Search, Package, Grid3X3, List, DollarSign, Warehouse, Image, Loader2, MoreVertical, RefreshCw, Download, Database, Globe, CheckCircle2 } from "lucide-react";
+import { Search, Package, Grid3X3, List, DollarSign, Warehouse, Image, Loader2, MoreVertical, Download, Database, Globe, CheckCircle2 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
 
@@ -347,7 +348,7 @@ export default function ProductSearch() {
                   <div key={product.supplier_sku} className="bg-zinc-950 border border-zinc-800 p-4 hover:border-zinc-700 transition-colors" data-testid={`catalog-product-${product.supplier_sku}`}>
                     <div className="flex items-start justify-between mb-2">
                       <div className="flex-1 min-w-0">
-                        <h3 className="font-medium text-sm truncate">{product.product_name || product.supplier_sku}</h3>
+                        <h3 className="font-medium text-sm truncate"><ProductLink productId={product.id}>{product.product_name || product.supplier_sku}</ProductLink></h3>
                         <p className="text-xs text-zinc-500 font-mono">{product.supplier_sku}</p>
                       </div>
                       {searchMode === "catalog" ? (
@@ -415,7 +416,7 @@ export default function ProductSearch() {
                   <div key={product.supplier_sku} className="bg-zinc-950 border border-zinc-800 p-3 flex items-center justify-between hover:border-zinc-700 transition-colors">
                     <div className="flex items-center gap-4">
                       <div>
-                        <h3 className="font-medium text-sm">{product.product_name || product.supplier_sku}</h3>
+                        <h3 className="font-medium text-sm"><ProductLink productId={product.id}>{product.product_name || product.supplier_sku}</ProductLink></h3>
                         <p className="text-xs text-zinc-500">
                           <span className="font-mono">{product.supplier_sku}</span>
                           {product.brand && <span className="ml-2">• {product.brand}</span>}
@@ -466,3 +467,4 @@ export default function ProductSearch() {
     </div>
   );
 }
+

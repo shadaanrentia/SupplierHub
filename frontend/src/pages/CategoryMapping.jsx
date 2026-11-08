@@ -1,3 +1,5 @@
+import {categorySuggestion} from '../lib/categorySuggestions';
+import SearchField from '@/components/SearchField';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import axios from "../lib/axios";
 import CategoryPolicyManager from "./CategoryPolicyEditor";
@@ -8,23 +10,25 @@ import { Checkbox } from "../components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { RefreshCw, FolderTree, ArrowRight, Check, X, Zap, ChevronRight, ChevronDown } from "lucide-react";
 
-const API = process.env.REACT_APP_BACKEND_URL + "/api";
+const API = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "") + "/api";
 
 function SearchableCategoryPicker({value, options, disabled, open, onToggle, onChange, label}) {
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(100);
   const container = useRef(null);
   const input = useRef(null);
+  const toggleRef = useRef(onToggle);
+  toggleRef.current = onToggle;
   const selected = options.find(option => option.value === value);
   const matches = useMemo(() => options.filter(option => option.label.toLowerCase().includes(query.trim().toLowerCase())), [options,query]);
   useEffect(() => {
     if (!open) return;
     setQuery(""); setLimit(100);
     input.current?.focus();
-    const outside = event => { if (!container.current?.contains(event.target)) onToggle(false); };
+    const outside = event => { if (!container.current?.contains(event.target)) toggleRef.current(false); };
     document.addEventListener("pointerdown", outside);
     return () => document.removeEventListener("pointerdown", outside);
-  }, [open,onToggle]);
+  }, [open]);
   return <div ref={container} className="relative min-w-[220px]" onKeyDown={event => {
     if (event.key === "Escape") { event.stopPropagation(); onToggle(false); container.current?.querySelector("[aria-haspopup]")?.focus(); }
   }}>
@@ -33,7 +37,7 @@ function SearchableCategoryPicker({value, options, disabled, open, onToggle, onC
       <span className="truncate">{selected?.label || (value !== "none" ? "Saved destination unavailable" : "— Not Mapped —")}</span><ChevronRight className="w-3 h-3 shrink-0" />
     </button>
     {open && <div className="absolute z-50 left-0 right-0 mt-1 bg-zinc-900 border border-zinc-700 rounded shadow-xl p-2">
-      <input ref={input} type="search" value={query} onChange={event => {setQuery(event.target.value);setLimit(100);}}
+      <SearchField ref={input} type="search" value={query} onChange={event => {setQuery(event.target.value);setLimit(100);}}
         aria-label="Search destination categories" placeholder="Search categories or full path…"
         onKeyDown={event => { if (event.key === "ArrowDown") {event.preventDefault();container.current?.querySelector('[role="option"]')?.focus();} }}
         className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-2 text-sm text-zinc-100 mb-2" />
@@ -57,7 +61,7 @@ function SearchableCategoryPicker({value, options, disabled, open, onToggle, onC
 
 function LegacyCategoryMapping() {
   const [suppliers, setSuppliers] = useState([]);
-  const [supplierId, setSupplierId] = useState("");
+  const [supplierId, setSupplierId] = useState(()=>new URLSearchParams(window.location.search).get("supplier_id") || "");
   const [supplierLoading, setSupplierLoading] = useState(false);
   const [supplierError, setSupplierError] = useState("");
   const [openPicker, setOpenPicker] = useState(null);
@@ -72,7 +76,7 @@ function LegacyCategoryMapping() {
   const [savingMapping, setSavingMapping] = useState({});
   const [selectedCategories, setSelectedCategories] = useState(new Set());
 
-  const [categorySearch, setCategorySearch] = useState("");
+  const [categorySearch, setCategorySearch] = useState(()=>new URLSearchParams(window.location.search).get("search") || "");
   const [mappingPage, setMappingPage] = useState(1);
   const [platformPage, setPlatformPage] = useState(1);
   const [expandedCategories,setExpandedCategories]=useState(new Set());
@@ -200,7 +204,7 @@ function LegacyCategoryMapping() {
 
   const lsLeafCategories = useMemo(() => {
     const parents = new Set(lightspeedCategories.map(c => c.parent_id).filter(Boolean).map(String));
-    return lightspeedCategories.filter(c => !parents.has(String(c.lightspeed_category_id)));
+    return lightspeedCategories.filter(c => c.hierarchy_valid!==false && !parents.has(String(c.lightspeed_category_id)));
   }, [lightspeedCategories]);
   const treeRows = useMemo(() => {
     const ancestors=[];
@@ -329,7 +333,7 @@ function LegacyCategoryMapping() {
           : [...prev, body];
       });
     } catch (e) {
-      toast.error("Failed to save mapping");
+      toast.error(typeof e.response?.data?.detail === "string" ? e.response.data.detail : "Failed to save mapping");
     } finally {
       setSavingMapping(prev => ({ ...prev, [supplierCategory]: false }));
     }
@@ -354,11 +358,11 @@ function LegacyCategoryMapping() {
   const targetOptions = useMemo(() => targetCategories.map(c => ({
     value: String(platform === "odoo" ? c.odoo_category_id : c.lightspeed_category_id),
     label: platform === "odoo" ? `${c.category_name}${c.parent_category ? ` (${c.parent_category})` : ""}`
-      : Array.isArray(c.category_path) && c.category_path.length ? c.category_path.map(p=>p.name).join(" > ") : c.category_name
+      : c.path || (Array.isArray(c.category_path) && c.category_path.length ? c.category_path.map(p=>p.name).join(" > ") : c.category_name)
   })).sort((a,b)=>String(a.label).localeCompare(String(b.label))), [targetCategories,platform]);
 
   const mappedCount = mappings.filter(m =>
-    platform === "odoo" ? m.odoo_category_id : m.lightspeed_category_id
+    platform === "odoo" ? m.odoo_category_id : targetOptions.some(option=>option.value===m.lightspeed_category_id)
   ).length;
 
   return (
@@ -470,7 +474,7 @@ function LegacyCategoryMapping() {
             lsHierarchy.length > 0 ? (
               <div>
               <div className="flex flex-wrap items-center gap-2 mb-3">
-                <input aria-label="Search Lightspeed categories" value={treeSearch} onChange={e=>setTreeSearch(e.target.value)}
+                <SearchField aria-label="Search Lightspeed categories" value={treeSearch} onChange={e=>setTreeSearch(e.target.value)}
                   placeholder="Search categories" className="bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm min-w-0 flex-1"/>
                 <Button variant="outline" size="sm" disabled={!!treeSearch.trim()} onClick={()=>setExpandedCategories(new Set(treeRows.filter(row=>row.hasChildren).map(row=>row.id)))}>Expand all</Button>
                 <Button variant="outline" size="sm" onClick={()=>{setTreeSearch('');setExpandedCategories(new Set());}}>Collapse all</Button>
@@ -550,7 +554,7 @@ function LegacyCategoryMapping() {
               {!suppliers.length && <option value="">No suppliers available</option>}
               {suppliers.map(supplier => <option key={supplier.id} value={supplier.id}>{supplier.supplier_name}</option>)}
             </select>
-            <input type="search" value={categorySearch} onChange={event => setCategorySearch(event.target.value)}
+            <SearchField type="search" value={categorySearch} onChange={event => setCategorySearch(event.target.value)}
               placeholder="Search supplier categories…" aria-label="Search supplier categories"
               className="w-full sm:w-80 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100" />
 
@@ -569,7 +573,8 @@ function LegacyCategoryMapping() {
                 <tbody>
                   {visibleSupplierCategories.map((supplierCat) => {
                     const currentMapping = getMappingForSupplier(supplierCat);
-                    const isMapped = currentMapping !== "none";
+                    const isMapped = currentMapping !== "none" && (platform === "odoo" || targetOptions.some(option=>option.value===currentMapping));
+                    const suggestion = platform === "lightspeed" ? categorySuggestion(supplierCat,targetOptions) : null;
                     return (
                       <tr key={supplierCat} className="border-b border-zinc-800/50 hover:bg-zinc-800/30" data-testid={`mapping-row-${supplierCat}`}>
                         <td className="py-2 px-3 text-zinc-100 font-medium">{supplierCat}</td>
@@ -578,6 +583,7 @@ function LegacyCategoryMapping() {
                             value={currentMapping} options={targetOptions} disabled={savingMapping[supplierCat] || supplierLoading}
                             open={openPicker === supplierCat} onToggle={show => setOpenPicker(show ? supplierCat : null)}
                             onChange={value => updateMapping(supplierCat,value)} label={`${platformLabel} category for ${supplierCat}`} />
+                          {suggestion && suggestion.value!==currentMapping && <div className="category-suggestion"><button disabled={savingMapping[supplierCat] || supplierLoading} onClick={()=>updateMapping(supplierCat,suggestion.value)}>Use {suggestion.label}</button></div>}
                         </td>
                         <td className="py-2 px-3">
                           {savingMapping[supplierCat] ? (
@@ -585,7 +591,7 @@ function LegacyCategoryMapping() {
                           ) : isMapped ? (
                             <Check className="w-4 h-4 text-green-400" />
                           ) : (
-                            <span className="text-zinc-500 text-xs">Not mapped</span>
+                            <span className={currentMapping!=="none"?"category-missing":"text-zinc-500 text-xs"}>{currentMapping!=="none"?"Needs mapping":"Not mapped"}</span>
                           )}
                         </td>
                       </tr>
@@ -650,4 +656,5 @@ export default function CategoryMapping() {
     <Button variant={mode==='defaults'?'default':'outline'} onClick={() => setMode('defaults')}>Category pricing &amp; measurements</Button>
   </div>{mode==='defaults'?<CategoryPolicyManager />:<LegacyCategoryMapping />}</>;
 }
+
 

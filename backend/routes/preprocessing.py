@@ -1,3 +1,4 @@
+from outbound_history import record as record_outbound
 """Preprocessing routes: Lightspeed validation, category defaults, supplier scope and preview."""
 import json
 from export_safety import validate_prices, export_name
@@ -56,9 +57,10 @@ async def policy_catalog(conn,supplier_id=None):
         WHERE d.store_domain=$1 AND ($2::varchar IS NULL OR d.supplier_id=$2)""",domain,supplier_id)
     for row in nodes:
         key=(row['supplier_id'],str(row['category_id']))
-        if not row['category_id']:continue
+        if not row['category_id'] or key[1] not in labels:continue
         item=entries.setdefault(key,{'supplier_id':key[0],'category_id':key[1],
-            'category_name':labels.get(key[1]) or 'Lightspeed category name unavailable',
+            'category_name':labels.get(key[1]) or 'Needs category mapping',
+            'category_available':key[1] in labels,
             'path':labels.get(key[1]) or '', 'product_count':0,'supplier_categories':[], 'supplier_paths':[]})
         if row['path'] not in item['supplier_paths']:item['supplier_paths'].append(row['path'])
     for key,item in entries.items():
@@ -89,20 +91,8 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
         products=await catalog(conn,search,supplier_id,lightweight=True)
         states=await load_readiness(conn,products,include_assets=False)
         policies=await category_policies(conn)
-        destination_names={}
-        if await conn.fetchval("SELECT to_regclass('public.lightspeed_category_snapshots')"):
-            snapshot=await conn.fetchval("""SELECT categories FROM lightspeed_category_snapshots
-                WHERE LOWER(BTRIM(store_domain))=(SELECT LOWER(BTRIM(lightspeed_store_id)) FROM settings WHERE id='system_settings') ORDER BY synced_at DESC NULLS LAST LIMIT 1""")
-            categories=json.loads(snapshot) if isinstance(snapshot,str) else (snapshot or [])
-            by_id={str(c.get('lightspeed_category_id') or c.get('id')):c for c in categories}
-            for cid,node in by_id.items():
-                names=[];seen=set();current=cid
-                while current in by_id and current not in seen:
-                    seen.add(current);item=by_id[current]
-                    name=item.get('category_name') or item.get('name')
-                    if name:names.insert(0,str(name))
-                    current=str(item.get('parent_id') or '')
-                if names:destination_names[cid]=' > '.join(names)
+        from category_scope import destination_labels
+        destination_names=await destination_labels(conn)
     result=[]
     for product in products:
         state=states[product['id']]
@@ -169,7 +159,7 @@ async def get_preprocessing_summary(supplier_id: str=None, category_id: str=None
         states=await load_readiness(conn,products,include_assets=False)
     products=[p for p in products if not states[p['id']]['excluded_from_queue'] and in_category(states[p['id']],category_id)]
     values=[states[p['id']] for p in products]; total=len(values)
-    mapped=sum(bool(s['mapped_lightspeed_category_id']) for s in values)
+    mapped=sum(bool(s['mapped_lightspeed_category_id']) and s.get('category_available',True) for s in values)
     with_images=sum(bool(s['images_count']) for s in values)
     with_price=sum(not p.get('price_needs_review') and float(p.get('base_price') or 0)>0 for p in products)
     return {'total_products':total,'total_variants':sum(s['variants_count'] for s in values),
@@ -283,6 +273,7 @@ async def validate_products_for_sync(data: dict=None, user: dict=Depends(get_cur
 
 
 @router.post("/preprocessing/sync-to-odoo")
+@record_outbound('sync_preprocessed_to_odoo')
 async def sync_preprocessed_to_odoo(data: dict = None, user: dict = Depends(get_current_user)):
     from odoo_service import OdooService
     product_ids = data.get('product_ids', []) if data else []
@@ -459,3 +450,18 @@ async def preview_product_for_odoo(product_id: str, user: dict = Depends(get_cur
 
 
 
+
+
+
+@router.get('/preprocessing/categories')
+async def preprocessing_categories(supplier_id: str=None,user=Depends(get_current_user)):
+    """Real Lightspeed hierarchy choices; stale saved IDs are not category options."""
+    await ensure_pricing_schema()
+    async with deps.pool.acquire() as conn:
+        products=await catalog(conn,supplier_id=supplier_id,lightweight=True)
+        states=await load_readiness(conn,products,include_assets=False)
+        snapshot=await conn.fetchval("""SELECT categories FROM lightspeed_category_snapshots
+            WHERE LOWER(BTRIM(store_domain))=(SELECT LOWER(BTRIM(lightspeed_store_id))
+            FROM settings WHERE id='system_settings') ORDER BY synced_at DESC NULLS LAST LIMIT 1""")
+    from category_tree import category_choices
+    return {'categories':category_choices(snapshot or [],products,states)}

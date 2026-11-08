@@ -145,3 +145,7 @@ code {
 .pp-load-error button{color:#93c5fd;white-space:nowrap}
 .pp-page button:focus-visible,.pp-page a:focus-visible,.pp-page input:focus-visible{outline:2px solid #60a5fa;outline-offset:3px}
 @media(max-width:768px){.pp-page{padding:16px}.pp-filters{gap:8px}.pp-search{min-width:0;flex-basis:100%;max-width:none}.pp-table-wrap{max-height:60vh}.pp-sync-bar{bottom:6px}.pp-sync-bar button{font-size:12px}.pp-header-actions{width:100%}}
+
+
+/* Submitted searches and normal-flow export controls. */
+.submitted-search{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%}.submitted-search>input{min-width:0;flex:1}.submitted-search>button{flex-shrink:0}.pp-sync-bar{position:static!important;bottom:auto!important;z-index:auto!important;margin-top:16px;box-shadow:none!important}.pp-filters .submitted-search{flex:1;min-width:220px}.pp-product-name{display:block;text-align:left}@media(max-width:640px){.submitted-search{width:100%}.pp-filters .submitted-search{min-width:0;flex-basis:100%}}

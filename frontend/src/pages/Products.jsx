@@ -1,1344 +1,582 @@
-import { useLightspeedSync } from '@/components/LightspeedSync';
-import { useState, useEffect, useCallback, useRef } from "react";
-import { useNavigate } from "react-router-dom";
-import axios from "axios";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
-import { Checkbox } from "@/components/ui/checkbox";
+import {categoryOptions,sortingSelection,sortingValue} from '../lib/dashboardCharts';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  advancedDefaults,
+  catalogueParams,
+  readCatalogueFilters,
+} from "../lib/catalogueFilters";
+import React, { useEffect, useRef, useState } from "react";
+import axios from "../lib/axios";
+import { toast } from "sonner";
 import {
-  Search,
   Package,
-  ChevronLeft,
-  ChevronRight,
   Grid3X3,
   List,
-  DollarSign,
-  Warehouse,
-  Image as ImageIcon,
-  Loader2,
-  MoreVertical,
-  Trash2,
   Download,
+  MoreVertical,
 } from "lucide-react";
+import SearchField from "../components/SearchField";
+import { ProductLink } from "../components/ProductDetails";
+import { EmptyState, RefreshButton } from "../components/workbenchUi";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { toast } from "sonner";
-
-const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
-const API = `${BACKEND_URL}/api`;
-
-const getProductImage = (product) => {
-  const candidates = [
-    product?.thumbnail,
-    product?.image,
-    product?.thumbnail_base64,
-  ];
-  for (const value of candidates) {
-    if (!value) continue;
-    const src = String(value).trim();
-    if (!src) continue;
-    if (src.startsWith("data:image/")) {
-      return src;
-    }
-    if (src.startsWith("http://") || src.startsWith("https://")) {
-      return `${API}/media_proxy?url=${encodeURIComponent(src)}`;
-    }
-    if (src.startsWith("/")) {
-      return `${BACKEND_URL}${src}`;
-    }
-    return `${BACKEND_URL}/${src}`;
+} from "../components/ui/dropdown-menu";
+const BASE = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "");
+const API = BASE + "/api";
+function price(value, currency = "CAD") {
+  if (value == null || value === "" || !Number.isFinite(Number(value)))
+    return "—";
+  try {
+    return new Intl.NumberFormat("en-CA", {
+      style: "currency",
+      currency,
+    }).format(Number(value));
+  } catch {
+    return String(value);
   }
-  return null;
-};
-
-function ProductImage({
-  product,
-  className = "",
-  fallbackIconSize = "w-8 h-8",
-}) {
-  const [imageFailed, setImageFailed] = useState(false);
-
-  const imageUrl = getProductImage(product);
-
-  useEffect(() => {
-    setImageFailed(false);
-  }, [imageUrl]);
-
-  if (!imageUrl || imageFailed) {
-    return (
-      <div
-        className={`absolute inset-0 flex items-center justify-center bg-zinc-800/50 ${className}`}
-      >
-        <Package
-          className={`${fallbackIconSize} text-zinc-700`}
-          strokeWidth={1}
-        />
-      </div>
-    );
-  }
-
-  return (
+}
+function imageUrl(product) {
+  const value = String(product.thumbnail || product.image || "").trim();
+  if (!value) return "";
+  if (value.startsWith("data:image/")) return value;
+  if (/^https?:\/\//.test(value))
+    return API + "/media_proxy?url=" + encodeURIComponent(value);
+  return BASE + (value.startsWith("/") ? value : "/" + value);
+}
+function ProductImage({ product }) {
+  const [failed, setFailed] = useState(false);
+  const url = imageUrl(product);
+  useEffect(() => setFailed(false), [url]);
+  return url && !failed ? (
     <img
-      src={imageUrl}
-      alt={product?.product_name || "Product"}
-      className={className}
+      src={url}
+      alt={product.product_name || "Product"}
       loading="lazy"
-      onError={() => {
-        console.error("PRODUCT IMAGE FAILED:", {
-          id: product?.id,
-          sku: product?.supplier_sku,
-          name: product?.product_name,
-          originalUrl: product?.thumbnail || product?.image,
-          proxyUrl: imageUrl,
-        });
-        setImageFailed(true);
-      }}
+      onError={() => setFailed(true)}
     />
+  ) : (
+    <div className="catalog-image-empty">
+      <Package size={28} />
+      <span>No image</span>
+    </div>
   );
 }
-
 export default function Products() {
-  const navigate = useNavigate();
-  const {showHistory} = useLightspeedSync();
-
-  const [products, setProducts] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [pages, setPages] = useState(1);
-  const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(true);
-
-  const [search, setSearch] = useState("");
-  const [supplier, setSupplier] = useState("all");
-  const [category, setCategory] = useState("all");
-  const [brand, setBrand] = useState("all");
-  const [selectedFilter, setSelectedFilter] = useState("all");
-  const [odooSyncFilter, setOdooSyncFilter] = useState("all");
-
-  const [suppliers, setSuppliers] = useState([]);
-  const [categories, setCategories] = useState([]);
-  const [brands, setBrands] = useState([]);
-
-  const [viewMode, setViewMode] = useState("grid");
-  const [syncing, setSyncing] = useState({});
-  const [selectedProducts, setSelectedProducts] = useState(new Set());
-  const [deleting, setDeleting] = useState(false);
-  const [exporting, setExporting] = useState(false);
+  const initial = useRef(readCatalogueFilters(window.location.search)).current;
+  const [products, setProducts] = useState([]),
+    [total, setTotal] = useState(0),
+    [pages, setPages] = useState(1),
+    [page, setPage] = useState(1),
+    [loading, setLoading] = useState(true),
+    [error, setError] = useState("");
+  const [search, setSearch] = useState(initial.search),
+    [supplier, setSupplier] = useState(initial.supplier),
+    [category, setCategory] = useState(initial.category),
+    [brand, setBrand] = useState(initial.brand);
+  const [suppliers, setSuppliers] = useState([]),
+    [categories, setCategories] = useState([]),
+    [brands, setBrands] = useState([]),
+    [filterError, setFilterError] = useState("");
+  const [view, setView] = useState("grid"),
+    [revision, setRevision] = useState(0),
+    [exporting, setExporting] = useState(false),
+    [syncing, setSyncing] = useState("");
   const exportLock = useRef(false);
-
-  const [categoriesLoading, setCategoriesLoading] = useState(true);
-  const [brandsLoading, setBrandsLoading] = useState(true);
-  const [filterError, setFilterError] = useState('');
-  const productRequest = useRef(0);
-
+  const [advanced, setAdvanced] = useState(initial.advanced),
+    [sort, setSort] = useState(initial.sort),
+    [facets, setFacets] = useState({ colours: [], sizes: [] });
+  const canExport = suppliers.some((item) => item.id === supplier);
+  const advancedCount = Object.values(advanced).filter(
+    (value) => value !== "",
+  ).length;
   useEffect(() => {
-    let live = true;
     const controller = new AbortController();
-    axios.get(`${API}/suppliers`, { signal: controller.signal })
-      .then(response => { if (live) setSuppliers(response.data.suppliers || []); })
-      .catch(error => { if (live && !axios.isCancel(error)) toast.error('Failed to load suppliers'); });
-    return () => { live = false; controller.abort(); };
+    axios
+      .get(API + "/products/filter-options", {
+        params: {
+          supplier_id: supplier || undefined,
+          category: category || undefined,
+          brand: brand || undefined,
+        },
+        signal: controller.signal,
+      })
+      .then((r) => {
+        if (!controller.signal.aborted) setFacets(r.data);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted)
+          setFilterError("Some smart filter choices could not be loaded.");
+      });
+    return () => controller.abort();
+  }, [supplier, category, brand]);
+  useEffect(() => {
+    const params = catalogueParams({
+      search,
+      supplier,
+      category,
+      brand,
+      sort,
+      advanced,
+    });
+    delete params.page;
+    delete params.limit;
+    if (params.sort === "newest") delete params.sort;
+    const query = new URLSearchParams(params).toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname +
+        (query ? "?" + query : "") +
+        window.location.hash,
+    );
+  }, [search, supplier, category, brand, sort, advanced]);
+  useEffect(() => {
+    const controller = new AbortController();
+    axios
+      .get(API + "/suppliers", { signal: controller.signal })
+      .then((r) =>
+        setSuppliers(Array.isArray(r.data) ? r.data : r.data.suppliers || []),
+      )
+      .catch(() => {});
+    return () => controller.abort();
   }, []);
-
   useEffect(() => {
-    let live = true;
     const controller = new AbortController();
+    setFilterError("");
     setCategories([]);
-    setCategoriesLoading(true);
-    setFilterError('');
-    axios.get(`${API}/products/categories`, {
-      signal: controller.signal,
-      params: supplier === 'all' ? {} : { supplier_id: supplier },
-    }).then(response => {
-      if (live) setCategories(response.data.categories || []);
-    }).catch(error => {
-      if (live && !axios.isCancel(error)) setFilterError('Unable to load categories. Refresh the page to retry.');
-    }).finally(() => { if (live) setCategoriesLoading(false); });
-    return () => { live = false; controller.abort(); };
+    axios
+      .get(API + "/products/categories", {
+        params: { supplier_id: supplier || undefined },
+        signal: controller.signal,
+      })
+      .then((r) => setCategories(r.data.categories || []))
+      .catch(() => {
+        if (!controller.signal.aborted)
+          setFilterError("Category filters could not be loaded.");
+      });
+    return () => controller.abort();
   }, [supplier]);
-
   useEffect(() => {
-    let live = true;
     const controller = new AbortController();
     setBrands([]);
-    setBrandsLoading(true);
-    axios.get(`${API}/products/brands`, {
-      signal: controller.signal,
-      params: {
-        ...(supplier !== 'all' && { supplier_id: supplier }),
-        ...(category !== 'all' && { category }),
-      },
-    }).then(response => {
-      if (live) setBrands(response.data.brands || []);
-    }).catch(error => {
-      if (live && !axios.isCancel(error)) toast.error('Unable to load brands');
-    }).finally(() => { if (live) setBrandsLoading(false); });
-    return () => { live = false; controller.abort(); };
+    axios
+      .get(API + "/products/brands", {
+        params: {
+          supplier_id: supplier || undefined,
+          category: category || undefined,
+        },
+        signal: controller.signal,
+      })
+      .then((r) => setBrands(r.data.brands || []))
+      .catch(() => {
+        if (!controller.signal.aborted)
+          setFilterError("Brand filters could not be loaded.");
+      });
+    return () => controller.abort();
   }, [supplier, category]);
-
-  const fetchProducts = useCallback(async () => {
-    const request = ++productRequest.current;
-    setLoading(true);
-
-    try {
-      const params = {
-        page,
-        limit: 20,
-      };
-
-      if (search.trim()) {
-        params.search = search.trim();
-      }
-
-      if (supplier !== "all") {
-        params.supplier_id = supplier;
-      }
-
-      if (category !== "all") {
-        params.category = category;
-      }
-
-      if (brand !== "all") {
-        params.brand = brand;
-      }
-
-      if (selectedFilter === "selected") {
-        params.selected_for_odoo = true;
-      }
-
-      if (selectedFilter === "not_selected") {
-        params.selected_for_odoo = false;
-      }
-
-      if (odooSyncFilter === "synced") {
-        params.odoo_synced = true;
-      }
-
-      if (odooSyncFilter === "not_synced") {
-        params.odoo_synced = false;
-      }
-
-      const response = await axios.get(`${API}/products`, {
-        params,
-      });
-
-      if (request !== productRequest.current) return;
-      setProducts(response.data.products || []);
-      setTotal(response.data.total || 0);
-      setPages(response.data.pages || 1);
-    } catch (error) {
-      if (request !== productRequest.current) return;
-      console.error("Products fetch error:", error);
-      toast.error(
-        error.response?.data?.detail || "Failed to load products"
-      );
-    } finally {
-      if (request === productRequest.current) setLoading(false);
-    }
-  }, [
-    page,
-    search,
-    supplier,
-    category,
-    brand,
-    selectedFilter,
-    odooSyncFilter,
-  ]);
-
   useEffect(() => {
-    fetchProducts();
-    return () => { productRequest.current += 1; };
-  }, [fetchProducts]);
-
-  const syncProduct = async (productId, type) => {
-    const key = `${productId}-${type}`;
-
-    setSyncing((previous) => ({
-      ...previous,
-      [key]: true,
-    }));
-
-    try {
-      const response = await axios.post(
-        `${API}/sync/product/${productId}/${type}`
-      );
-
-      if (response.data.success) {
-        toast.success(response.data.message);
-        fetchProducts();
-      } else {
-        toast.error(
-          response.data.message || `${type} sync failed`
-        );
-      }
-    } catch (error) {
-      console.error(`Failed to sync ${type}:`, error);
-
-      toast.error(
-        error.response?.data?.detail ||
-          `Failed to sync ${type}`
-      );
-    } finally {
-      setSyncing((previous) => ({
-        ...previous,
-        [key]: false,
-      }));
-    }
-  };
-
-  const toggleSelection = async (productId, currentValue) => {
-    try {
-      await axios.post(
-        `${API}/products/${productId}/select-for-odoo`,
-        {
-          product_id: productId,
-          selected: !currentValue,
-        }
-      );
-
-      setProducts((previous) =>
-        previous.map((product) =>
-          product.id === productId
-            ? {
-                ...product,
-                selected_for_odoo: !currentValue,
-              }
-            : product
-        )
-      );
-
-      toast.success(
-        !currentValue
-          ? "Selected for Odoo"
-          : "Deselected from Odoo"
-      );
-    } catch (error) {
-      console.error("Odoo selection error:", error);
-
-      toast.error(
-        error.response?.data?.detail ||
-          "Failed to update selection"
-      );
-    }
-  };
-
-  const toggleLightspeedSelection = async (
-    productId,
-    currentValue
-  ) => {
-    try {
-      await axios.post(
-        `${API}/products/${productId}/select-for-lightspeed`,
-        {
-          product_id: productId,
-          selected: !currentValue,
-        }
-      );
-
-      setProducts((previous) =>
-        previous.map((product) =>
-          product.id === productId
-            ? {
-                ...product,
-                selected_for_lightspeed: !currentValue,
-              }
-            : product
-        )
-      );
-
-      toast.success(
-        !currentValue
-          ? "Selected for Lightspeed"
-          : "Deselected from Lightspeed"
-      );
-    } catch (error) {
-      console.error("Lightspeed selection error:", error);
-
-      toast.error(
-        error.response?.data?.detail ||
-          "Failed to update selection"
-      );
-    }
-  };
-
-  const toggleProductSelect = (productId) => {
-    setSelectedProducts((previous) => {
-      const next = new Set(previous);
-
-      if (next.has(productId)) {
-        next.delete(productId);
-      } else {
-        next.add(productId);
-      }
-
-      return next;
-    });
-  };
-
-  const selectAllProducts = () => {
-    if (
-      products.length > 0 &&
-      selectedProducts.size === products.length
-    ) {
-      setSelectedProducts(new Set());
-    } else {
-      setSelectedProducts(
-        new Set(products.map((product) => product.id))
-      );
-    }
-  };
-
-  const deleteSelectedProducts = async () => {
-    if (selectedProducts.size === 0) {
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `Delete ${selectedProducts.size} selected product(s)?`
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    setDeleting(true);
-
-    try {
-      await axios.post(`${API}/products/bulk-delete`, {
-        product_ids: Array.from(selectedProducts),
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    axios
+      .get(API + "/products", {
+        params: catalogueParams({
+          page,
+          search,
+          supplier,
+          category,
+          brand,
+          sort,
+          advanced,
+        }),
+        signal: controller.signal,
+      })
+      .then((r) => {
+        if(controller.signal.aborted)return;
+        setProducts(r.data.products || []);
+        setTotal(r.data.total || 0);
+        setPages(Math.max(1, r.data.pages || 1));
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted)
+          setError(
+            typeof e.response?.data?.detail === "string"
+              ? e.response.data.detail
+              : "Products could not be loaded.",
+          );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
       });
-
-      toast.success(
-        `Deleted ${selectedProducts.size} products`
-      );
-
-      setSelectedProducts(new Set());
-
-      await fetchProducts();
-    } catch (error) {
-      console.error("Delete selected products error:", error);
-
-      toast.error(
-        error.response?.data?.detail ||
-          "Failed to delete products"
-      );
-    } finally {
-      setDeleting(false);
-    }
+    return () => controller.abort();
+  }, [page, supplier, category, brand, search, sort, advanced, revision]);
+  const refresh = () => setRevision((n) => n + 1);
+  const filters = !!(
+    supplier ||
+    category ||
+    brand ||
+    search ||
+    advancedCount ||
+    sort !== "newest"
+  );
+  const change = (setter) => (event) => {
+    setter(event.target.value);
+    setPage(1);
   };
-
-  const deleteAllProducts = async () => {
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ALL ${total} products? This action cannot be undone.`
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    setDeleting(true);
-
+  const clear = () => {
+    setSearch("");
+    setSupplier("");
+    setCategory("");
+    setBrand("");
+    setAdvanced({ ...advancedDefaults });
+    setSort("newest");
+    setPage(1);
+  };
+  async function sync(id, kind) {
+    if (syncing) return;
+    setSyncing(id + kind);
     try {
-      await axios.delete(`${API}/products/delete-all`);
-
-      toast.success("All products deleted");
-
-      setSelectedProducts(new Set());
-
-      await fetchProducts();
-    } catch (error) {
-      console.error("Delete all products error:", error);
-
+      const r = await axios.post(
+        `${API}/sync/product/${encodeURIComponent(id)}/${kind}`,
+      );
+      if (r.data.success === false)
+        throw new Error(r.data.message || "Sync failed");
+      toast.success(r.data.message || "Supplier data refreshed");
+      refresh();
+    } catch (e) {
       toast.error(
-        error.response?.data?.detail ||
-          "Failed to delete all products"
+        typeof e.response?.data?.detail === "string"
+          ? e.response.data.detail
+          : e.message || "Supplier sync failed",
       );
     } finally {
-      setDeleting(false);
+      setSyncing("");
     }
-  };
-
-  const exportSupplierList = async () => {
-    if (supplier === 'all' || exportLock.current) return;
+  }
+  async function download() {
+    if (!canExport || exportLock.current) return;
     exportLock.current = true;
     setExporting(true);
-    const supplierName = suppliers.find(item => item.id === supplier)?.supplier_name || 'Supplier';
     try {
-      const response = await axios.get(`${API}/products/export.xlsx`, {
-        params: { supplier_id: supplier }, responseType: 'blob', timeout: 300000,
+      const r = await axios.get(API + "/products/export.xlsx", {
+        params: { supplier_id: supplier },
+        responseType: "blob",
+        timeout: 300000,
       });
-      const url = window.URL.createObjectURL(response.data);
-      const link = document.createElement('a');
+      const url = URL.createObjectURL(r.data),
+        link = document.createElement("a");
       link.href = url;
-      link.download = `${supplierName.replace(/[^a-zA-Z0-9_-]+/g, '_')}_products.xlsx`;
-      document.body.appendChild(link);
+      link.download =
+        (
+          suppliers.find((s) => s.id === supplier)?.supplier_name || "supplier"
+        ).replace(/[^a-z0-9_-]+/gi, "_") + "-products.xlsx";
       link.click();
-      link.remove();
-      window.setTimeout(() => window.URL.revokeObjectURL(url), 10000);
-      toast.success('Supplier product list downloaded');
-    } catch (error) {
-      let message = 'Unable to export the supplier product list';
-      if (error.response?.data instanceof Blob) {
-        try { message = JSON.parse(await error.response.data.text()).detail || message; } catch (_) { /* Keep fallback. */ }
-      }
-      toast.error(typeof message === 'string' ? message : 'Unable to export products');
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch {
+      toast.error("Supplier list could not be exported");
     } finally {
       exportLock.current = false;
       setExporting(false);
     }
-  };
-
-  const handleSearch = (event) => {
-    event.preventDefault();
-
-    if (page !== 1) {
-      setPage(1);
-    } else {
-      fetchProducts();
-    }
-  };
-
-  const handleSupplierChange = (value) => {
-    setSupplier(value);
-    setCategory("all");
-    setBrand("all");
-    setCategories([]);
-    setBrands([]);
-    setSelectedProducts(new Set());
-    setPage(1);
-  };
-
-  const handleCategoryChange = (value) => {
-    setCategory(value);
-    setBrand("all");
-    setBrands([]);
-    setSelectedProducts(new Set());
-    setPage(1);
-  };
-
-  const handleBrandChange = (value) => {
-    setBrand(value);
-    setSelectedProducts(new Set());
-    setPage(1);
-  };
-
-  const handleSelectedFilterChange = (value) => {
-    setSelectedFilter(value);
-    setPage(1);
-  };
-
-  const handleOdooSyncFilterChange = (value) => {
-    setOdooSyncFilter(value);
-    setPage(1);
-  };
-
-  const handleProductClick = (productId) => {
-    navigate(`/products/${productId}`);
-  };
-
+  }
+  function actions(product) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className="wb-icon-button"
+            aria-label={`Actions for ${product.supplier_sku}`}
+          >
+            <MoreVertical size={16} />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          className="bg-zinc-900 border-zinc-700 text-zinc-100"
+          align="end"
+        >
+          {["pricing", "inventory", "media"].map((kind) => (
+            <DropdownMenuItem
+              key={kind}
+              disabled={!!syncing}
+              onSelect={() => sync(product.id, kind)}
+            >
+              Refresh supplier {kind}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  }
   return (
-    <div
-      className="p-6 space-y-4"
-      data-testid="products-page"
-    >
-      <div className="flex items-center justify-between">
+    <section className="wb-page catalog-page">
+      <header className="wb-page-header">
         <div>
-          <h1 className="font-heading text-3xl font-bold tracking-tight">
-            Products
-          </h1>
-
-          <p className="text-zinc-500 text-sm mt-1">
-            {total.toLocaleString()} products in catalog
+          <h1>Products</h1>
+          <p>
+            {loading
+              ? "Loading catalogue…"
+              : `${total.toLocaleString()} products${filters ? " · filtered" : " in database"}`}
           </p>
         </div>
-      </div>
-
-      <div
-        className="flex flex-wrap gap-3 items-end"
-        data-testid="product-filters"
-      >
-        <form
-          onSubmit={handleSearch}
-          className="flex gap-2"
-        >
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
-
-            <Input
-              placeholder="Search products..."
-              value={search}
-              onChange={(event) =>
-                setSearch(event.target.value)
-              }
-              className="pl-10 w-64 bg-zinc-950 border-zinc-800 rounded-none text-sm font-mono placeholder:text-zinc-600 focus:border-blue-500"
-              data-testid="search-input"
-            />
-          </div>
-        </form>
-
-        <Select
-          value={supplier}
-          onValueChange={handleSupplierChange}
-        >
-          <SelectTrigger
-            className="w-44 bg-zinc-950 border-zinc-800 rounded-none text-sm"
-            data-testid="filter-supplier"
-          >
-            <SelectValue placeholder="Supplier" />
-          </SelectTrigger>
-
-          <SelectContent className="bg-zinc-900 border-zinc-800 rounded-none">
-            <SelectItem value="all">
-              All Suppliers
-            </SelectItem>
-
-            {suppliers.map((supplierItem) => (
-              <SelectItem
-                key={supplierItem.id}
-                value={supplierItem.id}
-              >
-                {supplierItem.supplier_name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={category}
-          disabled={categoriesLoading}
-          onValueChange={handleCategoryChange}
-        >
-          <SelectTrigger
-            className="w-40 bg-zinc-950 border-zinc-800 rounded-none text-sm"
-            data-testid="filter-category"
-          >
-            <SelectValue placeholder="Category" />
-          </SelectTrigger>
-
-          <SelectContent className="bg-zinc-900 border-zinc-800 rounded-none">
-            <SelectItem value="all">
-              {categoriesLoading ? "Loading categories…" : "All Categories"}
-            </SelectItem>
-
-            {categories.map((categoryItem) => (
-              <SelectItem
-                key={categoryItem}
-                value={categoryItem}
-              >
-                {categoryItem}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={brand}
-          disabled={brandsLoading}
-          onValueChange={handleBrandChange}
-        >
-          <SelectTrigger
-            className="w-40 bg-zinc-950 border-zinc-800 rounded-none text-sm"
-            data-testid="filter-brand"
-          >
-            <SelectValue placeholder="Brand" />
-          </SelectTrigger>
-
-          <SelectContent className="bg-zinc-900 border-zinc-800 rounded-none">
-            <SelectItem value="all">
-              {brandsLoading ? "Loading brands…" : "All Brands"}
-            </SelectItem>
-
-            {brands.map((brandItem) => (
-              <SelectItem
-                key={brandItem}
-                value={brandItem}
-              >
-                {brandItem}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={selectedFilter}
-          onValueChange={handleSelectedFilterChange}
-        >
-          <SelectTrigger
-            className="w-44 bg-zinc-950 border-zinc-800 rounded-none text-sm"
-            data-testid="filter-selection"
-          >
-            <SelectValue placeholder="Selection" />
-          </SelectTrigger>
-
-          <SelectContent className="bg-zinc-900 border-zinc-800 rounded-none">
-            <SelectItem value="all">
-              All Products
-            </SelectItem>
-
-            <SelectItem value="selected">
-              Selected for Odoo
-            </SelectItem>
-
-            <SelectItem value="not_selected">
-              Not Selected
-            </SelectItem>
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={odooSyncFilter}
-          onValueChange={handleOdooSyncFilterChange}
-        >
-          <SelectTrigger
-            className="w-44 bg-zinc-950 border-zinc-800 rounded-none text-sm"
-            data-testid="filter-odoo-sync"
-          >
-            <SelectValue placeholder="Odoo Sync Status" />
-          </SelectTrigger>
-
-          <SelectContent className="bg-zinc-900 border-zinc-800 rounded-none">
-            <SelectItem value="all">
-              All Sync Status
-            </SelectItem>
-
-            <SelectItem value="synced">
-              Synced to Odoo
-            </SelectItem>
-
-            <SelectItem value="not_synced">
-              Not Synced
-            </SelectItem>
-          </SelectContent>
-        </Select>
-
-        <Button type="button" variant="outline" disabled={supplier === 'all' || exporting}
-          onClick={exportSupplierList} title={supplier === 'all' ? 'Select a supplier to export' : 'Export all products from this supplier'}
-          className="rounded-none border-zinc-700 text-zinc-200 hover:bg-zinc-800" data-testid="export-supplier-list">
-          {exporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin"/> : <Download className="w-4 h-4 mr-2"/>}
-          {exporting ? 'Exporting…' : 'Export list'}
-        </Button>
-
-        <div className="flex border border-zinc-800 ml-auto">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setViewMode("grid")}
-            className={`rounded-none px-3 ${
-              viewMode === "grid"
-                ? "bg-zinc-800 text-white"
-                : "text-zinc-500 hover:text-white"
-            }`}
-            data-testid="view-grid"
-          >
-            <Grid3X3 className="w-4 h-4" />
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setViewMode("list")}
-            className={`rounded-none px-3 ${
-              viewMode === "list"
-                ? "bg-zinc-800 text-white"
-                : "text-zinc-500 hover:text-white"
-            }`}
-            data-testid="view-list"
-          >
-            <List className="w-4 h-4" />
-          </Button>
+        <div className="wb-row-actions">
+          <RefreshButton onClick={refresh} disabled={loading} />
         </div>
+      </header>
+      <div className="catalog-filters">
+        <SearchField
+          aria-label="Search products"
+          placeholder="Search product name or SKU"
+          value={search}
+          onChange={change(setSearch)}
+        />
+        <select
+          className="wb-control"
+          aria-label="Products supplier"
+          value={supplier}
+          onChange={(e) => {
+            setSupplier(e.target.value);
+            setCategory("");
+            setBrand("");
+            setPage(1);
+          }}
+        >
+          <option value="">All suppliers</option>
+          {facets.unassigned_supplier && (
+            <option value="__unassigned__">Unassigned supplier</option>
+          )}
+          {suppliers.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.supplier_name}
+            </option>
+          ))}
+        </select>
+        <select
+          className="wb-control"
+          aria-label="Products category"
+          value={category}
+          onChange={(e) => {
+            setCategory(e.target.value);
+            setBrand("");
+            setPage(1);
+          }}
+        >
+          <option value="">All categories</option>
+          {categoryOptions(categories).map(option=><option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+        <select
+          className="wb-control"
+          aria-label="Products brand"
+          value={brand}
+          onChange={change(setBrand)}
+        >
+          <option value="">All brands</option>
+          {[...new Set([...brands, "Unbranded"])].map((b) => (
+            <option
+              key={b}
+              value={b.toLowerCase() === "unbranded" ? "__unbranded__" : b}
+            >
+              {b}
+            </option>
+          ))}
+        </select>
+        {filters && (
+          <button className="wb-text-link" onClick={clear}>
+            Clear filters
+          </button>
+        )}
       </div>
-
-      {filterError && <p role="alert" className="text-sm text-amber-400">{filterError}</p>}
-
-      {viewMode === "list" && (
-        <div className="flex items-center justify-between p-3 bg-zinc-900/50 border border-zinc-800">
-          <div className="flex items-center gap-4">
-            <Checkbox
-              checked={
-                products.length > 0 &&
-                selectedProducts.size === products.length
-              }
-              onCheckedChange={selectAllProducts}
-              data-testid="select-all-checkbox"
-            />
-
-            <span className="text-sm text-zinc-400">
-              {selectedProducts.size > 0
-                ? `${selectedProducts.size} selected`
-                : "Select all"}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {selectedProducts.size > 0 && (
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={deleteSelectedProducts}
-                disabled={deleting}
-                className="rounded-none bg-red-900/50 hover:bg-red-900 border-red-800"
-                data-testid="delete-selected-btn"
+      {advancedCount > 0 && (
+        <div className="catalog-filter-chips">
+          {Object.entries(advanced)
+            .filter(([key, value]) => value !== "" && key!=="colour")
+            .map(([key, value]) => (
+              <button
+                key={key}
+                onClick={() => {
+                  setAdvanced((old) => ({ ...old, [key]: "" }));
+                  setPage(1);
+                }}
+                aria-label={`Remove ${key.replace(/_/g, " ")} filter`}
               >
-                {deleting ? (
-                  <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                ) : (
-                  <Trash2 className="w-4 h-4 mr-1" />
-                )}
-
-                Delete Selected
-              </Button>
-            )}
-
-            <Button variant="outline" size="sm" onClick={()=>showHistory(null)}>Lightspeed sync history</Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="rounded-none border-zinc-700 text-zinc-300"
-                >
-                  <MoreVertical className="w-4 h-4" />
-                </Button>
-              </DropdownMenuTrigger>
-
-              <DropdownMenuContent
-                align="end"
-                className="bg-zinc-900 border-zinc-800"
-              >
-                <DropdownMenuItem
-                  onClick={deleteAllProducts}
-                  className="text-red-400 focus:text-red-300 focus:bg-red-950/30"
-                  disabled={deleting}
-                >
-                  <Trash2 className="w-4 h-4 mr-2" />
-                  Delete All Products
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
+                {key.replace(/_/g, " ")}: {String(value).replace(/_/g, " ")} ×
+              </button>
+            ))}
         </div>
       )}
-
-      {loading ? (
-        <div
-          className={
-            viewMode === "grid"
-              ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"
-              : "space-y-2"
-          }
-        >
-          {Array(8)
-            .fill(0)
-            .map((_, index) => (
-              <div
-                key={index}
-                className={
-                  viewMode === "grid"
-                    ? "h-48 bg-zinc-800/30 animate-pulse rounded-sm"
-                    : "h-16 bg-zinc-800/30 animate-pulse rounded-sm"
-                }
-              />
-            ))}
+      {filterError && (
+        <p className="wb-muted" role="status">
+          {filterError}
+        </p>
+      )}
+      <div className="wb-toolbar">
+        <div className="wb-toolbar-left">
+          <button
+            className="wb-button"
+            disabled={!canExport || exporting}
+            title={
+              !canExport
+                ? "Choose a supplier to export its complete catalogue"
+                : undefined
+            }
+            onClick={download}
+          >
+            <Download size={14} />
+            {exporting ? "Exporting…" : "Export list"}
+          </button>
         </div>
-      ) : products.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20 text-zinc-500">
-          <Package
-            className="w-12 h-12 mb-4 text-zinc-700"
-            strokeWidth={1}
-          />
-
-          <p className="font-mono text-sm">
-            NO PRODUCTS FOUND
-          </p>
-
-          <p className="text-xs mt-1">
-            Sync products from a supplier or seed demo data
-          </p>
-        </div>
-      ) : viewMode === "grid" ? (
-        <div
-          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"
-          data-testid="product-grid"
-        >
-          {products.map((product) => {
-            const imageUrl = getProductImage(product);
-
-            return (
-              <Card
-                key={product.id}
-                className="bg-zinc-900/50 border-zinc-800 rounded-sm hover:border-zinc-700 transition-colors group overflow-hidden"
-                data-testid={`product-card-${product.id}`}
-              >
-                <CardContent className="p-0">
-                  <div
-                    className="relative h-32 bg-zinc-800/50 flex items-center justify-center border-b border-zinc-800/50 overflow-hidden cursor-pointer"
-                    onClick={() =>
-                      handleProductClick(product.id)
-                    }
-                  >
-                    {imageUrl ? (
-                      <ProductImage
-                        product={product}
-                        className="relative z-10 h-full w-full object-contain p-2"
-                        fallbackIconSize="w-8 h-8"
-                      />
-                    ) : (
-                      <div className="absolute inset-0 flex items-center justify-center bg-zinc-800/50">
-                        <Package
-                          className="w-8 h-8 text-zinc-700"
-                          strokeWidth={1}
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="p-3 space-y-2">
-                    <div className="flex items-start justify-between">
-                      <div
-                        className="cursor-pointer flex-1 min-w-0"
-                        onClick={() =>
-                          handleProductClick(product.id)
-                        }
-                      >
-                        <p className="text-sm font-medium text-zinc-200 group-hover:text-white transition-colors line-clamp-1">
-                          {product.product_name}
-                        </p>
-
-                        <p className="text-xs font-mono text-zinc-500 mt-0.5">
-                          {product.supplier_sku}
-                        </p>
-                      </div>
-
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 w-6 p-0 text-zinc-500 hover:text-white"
-                          >
-                            <MoreVertical className="w-4 h-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-
-                        <DropdownMenuContent
-                          align="end"
-                          className="bg-zinc-900 border-zinc-800"
-                        >
-                          <DropdownMenuItem
-                            onClick={() =>
-                              syncProduct(
-                                product.id,
-                                "pricing"
-                              )
-                            }
-                            disabled={
-                              syncing[
-                                `${product.id}-pricing`
-                              ]
-                            }
-                            className="text-zinc-300 focus:bg-zinc-800"
-                          >
-                            {syncing[
-                              `${product.id}-pricing`
-                            ] ? (
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            ) : (
-                              <DollarSign className="w-4 h-4 mr-2" />
-                            )}
-                            Sync Pricing
-                          </DropdownMenuItem>
-
-                          <DropdownMenuItem
-                            onClick={() =>
-                              syncProduct(
-                                product.id,
-                                "inventory"
-                              )
-                            }
-                            disabled={
-                              syncing[
-                                `${product.id}-inventory`
-                              ]
-                            }
-                            className="text-zinc-300 focus:bg-zinc-800"
-                          >
-                            {syncing[
-                              `${product.id}-inventory`
-                            ] ? (
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            ) : (
-                              <Warehouse className="w-4 h-4 mr-2" />
-                            )}
-                            Sync Inventory
-                          </DropdownMenuItem>
-
-                          <DropdownMenuItem
-                            onClick={() =>
-                              syncProduct(
-                                product.id,
-                                "media"
-                              )
-                            }
-                            disabled={
-                              syncing[
-                                `${product.id}-media`
-                              ]
-                            }
-                            className="text-zinc-300 focus:bg-zinc-800"
-                          >
-                            {syncing[
-                              `${product.id}-media`
-                            ] ? (
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            ) : (
-                              <ImageIcon className="w-4 h-4 mr-2" />
-                            )}
-                            Sync Media
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={()=>showHistory(product.id,product.product_name)}>Lightspeed sync history</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-zinc-400">
-                        {product.brand}
-                      </span>
-
-                      <span className="font-mono text-zinc-300 tabular-nums">
-                        $
-                        {Number(
-                          product.base_price || 0
-                        ).toFixed(2)}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-zinc-500">
-                        {product.variant_count || 0} variants
-                      </span>
-
-                      <span
-                        className={`px-1.5 py-0.5 font-mono border rounded-none ${
-                          product.status === "active"
-                            ? "bg-emerald-950/50 text-emerald-400 border-emerald-800"
-                            : "bg-zinc-800 text-zinc-500 border-zinc-700"
-                        }`}
-                      >
-                        {product.status}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-1 border-t border-zinc-800/50">
-                      <span className="text-xs text-zinc-400">
-                        Odoo
-                      </span>
-
-                      <Switch
-                        checked={
-                          !!product.selected_for_odoo
-                        }
-                        onCheckedChange={() =>
-                          toggleSelection(
-                            product.id,
-                            product.selected_for_odoo
-                          )
-                        }
-                        data-testid={`odoo-toggle-${product.id}`}
-                        className="data-[state=checked]:bg-blue-600"
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-zinc-400">
-                        Lightspeed
-                      </span>
-
-                      <Switch
-                        checked={
-                          !!product.selected_for_lightspeed
-                        }
-                        onCheckedChange={() =>
-                          toggleLightspeedSelection(
-                            product.id,
-                            product.selected_for_lightspeed
-                          )
-                        }
-                        data-testid={`ls-toggle-${product.id}`}
-                        className="data-[state=checked]:bg-emerald-600"
-                      />
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-      ) : (
-        <div
-          className="space-y-2"
-          data-testid="product-list"
-        >
-          {products.map((product) => (
-            <div
-              key={product.id}
-              className={`flex items-center gap-4 p-3 bg-zinc-900/50 border transition-colors ${
-                selectedProducts.has(product.id)
-                  ? "border-blue-600 bg-blue-950/20"
-                  : "border-zinc-800 hover:border-zinc-700"
-              }`}
-              data-testid={`product-row-${product.id}`}
+        <div className="wb-toolbar-right">
+          <select className="wb-control catalog-colour-control" aria-label="Colour filter" value={advanced.colour} onChange={e=>{setAdvanced(old=>({...old,colour:e.target.value}));setPage(1);}}><option value="">All colours</option>{[...new Set([...(facets.colours||[]),advanced.colour].filter(Boolean))].map(colour=><option key={colour}>{colour}</option>)}</select>
+          <div className="catalog-sort-controls"><label>Sort by<select className="wb-control" aria-label="Sort field" value={sortingSelection(sort).field} onChange={e=>{setSort(sortingValue(e.target.value,sortingSelection(sort).direction));setPage(1);}}>{[['product','Product'],['brand','Brand'],['inventory','Inventory'],['price','Price'],['added','Date added'],['updated','Last updated'],['variants','Variants']].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label><label>Order<select className="wb-control" aria-label="Sort direction" value={sortingSelection(sort).direction} onChange={e=>{setSort(sortingValue(sortingSelection(sort).field,e.target.value));setPage(1);}}><option value="asc">Ascending ↑</option><option value="desc">Descending ↓</option></select></label></div>
+          <div className="wb-segment" aria-label="Product view">
+            <button
+              aria-label="Grid view"
+              aria-pressed={view === "grid"}
+              className={view === "grid" ? "is-selected" : ""}
+              onClick={() => setView("grid")}
             >
-              <Checkbox
-                checked={selectedProducts.has(product.id)}
-                onCheckedChange={() =>
-                  toggleProductSelect(product.id)
-                }
-                data-testid={`select-product-${product.id}`}
-              />
-
-              <div
-                className="relative w-16 h-16 bg-zinc-800/50 flex items-center justify-center overflow-hidden cursor-pointer shrink-0"
-                onClick={() =>
-                  handleProductClick(product.id)
-                }
-              >
-                <ProductImage
-                  product={product}
-                  className="relative z-10 h-full w-full object-contain p-1"
-                  fallbackIconSize="w-6 h-6"
-                />
-              </div>
-
-              <div
-                className="flex-1 min-w-0 cursor-pointer"
-                onClick={() =>
-                  handleProductClick(product.id)
-                }
-              >
-                <p className="text-sm font-medium text-zinc-200 truncate">
-                  {product.product_name}
-                </p>
-
-                <p className="text-xs font-mono text-zinc-500">
-                  {product.supplier_sku}
-                </p>
-                <button className="mt-1 text-xs text-blue-400 hover:underline" onClick={event=>{event.stopPropagation();showHistory(product.id,product.product_name);}}>Lightspeed sync history</button>
-              </div>
-
-              <div className="text-right shrink-0">
-                <p className="text-xs text-zinc-400">
-                  {product.brand}
-                </p>
-
-                <p className="text-sm font-mono text-zinc-300">
-                  $
-                  {Number(
-                    product.base_price || 0
-                  ).toFixed(2)}
-                </p>
-              </div>
-
-              <div className="text-center shrink-0 w-20">
-                <p className="text-xs text-zinc-500">
-                  {product.variant_count || 0} variants
-                </p>
-
-                <span
-                  className={`inline-block px-1.5 py-0.5 text-xs font-mono border rounded-none ${
-                    product.status === "active"
-                      ? "bg-emerald-950/50 text-emerald-400 border-emerald-800"
-                      : "bg-zinc-800 text-zinc-500 border-zinc-700"
-                  }`}
+              <Grid3X3 size={16} />
+            </button>
+            <button
+              aria-label="List view"
+              aria-pressed={view === "list"}
+              className={view === "list" ? "is-selected" : ""}
+              onClick={() => setView("list")}
+            >
+              <List size={16} />
+            </button>
+          </div>
+        </div>
+      </div>
+      {error ? (
+        <div className="wb-alert wb-alert--danger" role="alert">
+          {error}
+          <button className="wb-button" onClick={refresh}>
+            Retry
+          </button>
+        </div>
+      ) : loading ? (
+        <div className="wb-loading">Loading products…</div>
+      ) : !products.length ? (
+        <EmptyState
+          title={filters ? "No matching products" : "No products saved yet"}
+          action={
+            filters ? (
+              <button className="wb-button" onClick={clear}>
+                Clear filters
+              </button>
+            ) : undefined
+          }
+        />
+      ) : view === "grid" ? (
+        <div className="catalog-grid">
+          {products.map((product) => (
+            <article className="catalog-card" key={product.id}>
+              <div className="catalog-card-image">
+                <ProductLink
+                  productId={product.id}
+                  aria-label={`View ${product.product_name}`}
                 >
-                  {product.status}
-                </span>
+                  <ProductImage product={product} />
+                </ProductLink>
               </div>
-
-              <div className="flex items-center gap-2 shrink-0">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    syncProduct(
-                      product.id,
-                      "pricing"
-                    )
-                  }
-                  disabled={
-                    syncing[
-                      `${product.id}-pricing`
-                    ]
-                  }
-                  className="h-8 px-2 text-zinc-500 hover:text-emerald-400"
-                  title="Sync Pricing"
-                >
-                  {syncing[
-                    `${product.id}-pricing`
-                  ] ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <DollarSign className="w-4 h-4" />
-                  )}
-                </Button>
-
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    syncProduct(
-                      product.id,
-                      "inventory"
-                    )
-                  }
-                  disabled={
-                    syncing[
-                      `${product.id}-inventory`
-                    ]
-                  }
-                  className="h-8 px-2 text-zinc-500 hover:text-blue-400"
-                  title="Sync Inventory"
-                >
-                  {syncing[
-                    `${product.id}-inventory`
-                  ] ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Warehouse className="w-4 h-4" />
-                  )}
-                </Button>
-
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() =>
-                    syncProduct(
-                      product.id,
-                      "media"
-                    )
-                  }
-                  disabled={
-                    syncing[
-                      `${product.id}-media`
-                    ]
-                  }
-                  className="h-8 px-2 text-zinc-500 hover:text-purple-400"
-                  title="Sync Media"
-                >
-                  {syncing[
-                    `${product.id}-media`
-                  ] ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <ImageIcon className="w-4 h-4" />
-                  )}
-                </Button>
+              <div className="catalog-card-content">
+                <div className="catalog-card-title">
+                  <ProductLink productId={product.id}>
+                    {product.product_name || product.supplier_sku}
+                  </ProductLink>
+                  {actions(product)}
+                </div>
+                <p className="catalog-sku">{product.supplier_sku}</p>
+                <dl>
+                  <div>
+                    <dt>Brand</dt>
+                    <dd>{String(product.brand||" ").trim() || "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Category</dt>
+                    <dd>{String(product.category||" ").trim() || "Uncategorized"}</dd>
+                  </div>
+                  <div><dt>Inventory</dt><dd title="Saved variant inventory total">{product.inventory_total==null?'—':Number(product.inventory_total).toLocaleString()}</dd></div>
+                  <div>
+                    <dt>Supplier</dt>
+                    <dd>{product.supplier_name || "—"}</dd>
+                  </div>
+                </dl>
+                <footer>
+                  <span>
+                    {product.variant_count ?? 0} variants ·{" "}
+                    {product.media_count ?? 0} images
+                  </span>
+                  <strong>
+                    {price(product.base_price, product.currency || "CAD")}
+                  </strong>
+                </footer>
               </div>
-
-              <div className="flex items-center gap-2 shrink-0 border-l border-zinc-800 pl-3">
-                <span className="text-xs text-zinc-500">
-                  Odoo
-                </span>
-
-                <Switch
-                  checked={
-                    !!product.selected_for_odoo
-                  }
-                  onCheckedChange={() =>
-                    toggleSelection(
-                      product.id,
-                      product.selected_for_odoo
-                    )
-                  }
-                  data-testid={`odoo-toggle-list-${product.id}`}
-                  className="data-[state=checked]:bg-blue-600"
-                />
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0 border-l border-zinc-800 pl-3">
-                <span className="text-xs text-zinc-500">
-                  LS
-                </span>
-
-                <Switch
-                  checked={
-                    !!product.selected_for_lightspeed
-                  }
-                  onCheckedChange={() =>
-                    toggleLightspeedSelection(
-                      product.id,
-                      product.selected_for_lightspeed
-                    )
-                  }
-                  data-testid={`ls-toggle-list-${product.id}`}
-                  className="data-[state=checked]:bg-emerald-600"
-                />
-              </div>
-            </div>
+            </article>
           ))}
         </div>
-      )}
-
-      {pages > 1 && (
-        <div
-          className="flex items-center justify-between pt-4"
-          data-testid="pagination"
-        >
-          <span className="text-xs text-zinc-500 font-mono">
-            Page {page} of {pages} ({total} total)
-          </span>
-
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                setPage((currentPage) =>
-                  Math.max(1, currentPage - 1)
-                )
-              }
-              disabled={page === 1}
-              className="rounded-none border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-              data-testid="prev-page-btn"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </Button>
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                setPage((currentPage) =>
-                  Math.min(
-                    pages,
-                    currentPage + 1
-                  )
-                )
-              }
-              disabled={page === pages}
-              className="rounded-none border-zinc-700 text-zinc-300 hover:bg-zinc-800"
-              data-testid="next-page-btn"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </Button>
-          </div>
+      ) : (
+        <div className="wb-table-wrap">
+          <table className="wb-table">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>Brand</th>
+                <th>Category</th>
+                <th>Supplier</th>
+                <th>Variants</th>
+                <th>Inventory</th><th>Supplier price</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {products.map((product) => (
+                <tr key={product.id}>
+                  <td>
+                    <ProductLink productId={product.id}>
+                      {product.product_name}
+                    </ProductLink>
+                    <small>{product.supplier_sku}</small>
+                  </td>
+                  <td>{String(product.brand||" ").trim() || "—"}</td>
+                  <td>{String(product.category||" ").trim() || "Uncategorized"}</td>
+                  <td>{product.supplier_name || "—"}</td>
+                  <td>{product.variant_count ?? 0}</td>
+                  <td>{product.inventory_total==null?'—':Number(product.inventory_total).toLocaleString()}</td><td>
+                    {price(product.base_price, product.currency || "CAD")}
+                  </td>
+                  <td>{actions(product)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
-    </div>
+      <div className="wb-pagination">
+        <span>{loading ? "" : `${total.toLocaleString()} products`}</span>
+        <div>
+          <button
+            className="wb-button"
+            disabled={loading || page <= 1}
+            onClick={() => setPage((n) => n - 1)}
+          >
+            Previous
+          </button>
+          <span>
+            {page} / {pages}
+          </span>
+          <button
+            className="wb-button"
+            disabled={loading || page >= pages}
+            onClick={() => setPage((n) => n + 1)}
+          >
+            Next
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
-
-

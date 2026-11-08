@@ -31,6 +31,8 @@ def parse_skus(value):
 
 
 async def init_sync_schema(conn):
+    from outbound_history import init_schema as init_outbound_history
+    await init_outbound_history(conn)
     from bulk_data import init_bulk_schema
     await init_bulk_schema(conn)
     await conn.execute("ALTER TABLE product_media ADD COLUMN IF NOT EXISTS source_color TEXT DEFAULT ''; ALTER TABLE product_media ADD COLUMN IF NOT EXISTS source_part_ids JSONB DEFAULT '[]'::jsonb")
@@ -860,3 +862,7 @@ async def odoo_push_task(supplier_id: str, log_id: str):
     except Exception as e:
         logger.error("Odoo push task error: %s", e)
         await update_sync_log(log_id, 'failed', f'Error: {str(e)}')
+
+
+from sync_history import router as sync_history_router
+router.include_router(sync_history_router)

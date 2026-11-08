@@ -1,3 +1,4 @@
+import {ProductDetailsProvider} from "@/components/ProductDetails";
 import { LightspeedSyncProvider } from '@/components/LightspeedSync';
 import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
@@ -12,6 +13,7 @@ const getNavItems = (isAdmin) => {
     { path: "/product-search", label: "Product Search", icon: Search },
     { path: "/suppliers", label: "Suppliers", icon: Truck },
     { path: "/sync", label: "Sync Jobs", icon: RefreshCw },
+    { path: "/sync-history", label: "Sync History", icon: RefreshCw },
     { path: "/category-mapping", label: "Category Mapping", icon: FolderTree },
     { path: "/preprocessing", label: "Pre-Processing", icon: Zap },
     { path: "/export-review", label: "Export Review", icon: Layers },
@@ -24,12 +26,12 @@ const getNavItems = (isAdmin) => {
 };
 
 export default function Layout({ user, onLogout }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(()=>window.matchMedia("(max-width: 768px)").matches);
   const location = useLocation();
   const navItems = getNavItems(user?.role === "admin");
 
   return (
-    <LightspeedSyncProvider><div className="flex h-screen bg-[#09090B] text-zinc-100 font-body">
+    <ProductDetailsProvider><LightspeedSyncProvider><div className="sh-app flex h-screen bg-[#09090B] text-zinc-100 font-body">
       <aside
         className={cn(
           "flex flex-col border-r border-zinc-800 bg-[#09090B] transition-all duration-200 shrink-0",
@@ -46,12 +48,12 @@ export default function Layout({ user, onLogout }) {
           )}
         </div>
 
-        <nav className="flex-1 py-4 space-y-0.5 px-2">
+        <nav className="flex-1 overflow-y-auto py-4 space-y-0.5 px-2">
           {navItems.map((item) => {
             const isActive =
               item.path === "/"
                 ? location.pathname === "/"
-                : location.pathname.startsWith(item.path);
+                : (location.pathname === item.path || location.pathname.startsWith(item.path + "/"));
             return (
               <NavLink
                 key={item.path}
@@ -118,11 +120,12 @@ export default function Layout({ user, onLogout }) {
         </button>
       </aside>
 
-      <main className="flex-1 overflow-auto pb-28">
+      <main className="flex-1 min-w-0 overflow-auto pb-6">
         <Outlet />
       </main>
-    </div></LightspeedSyncProvider>
+    </div></LightspeedSyncProvider></ProductDetailsProvider>
   );
 }
+
 
 

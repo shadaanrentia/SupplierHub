@@ -1,3 +1,4 @@
+from outbound_history import record as record_outbound
 """Odoo routes: connection test, push products, sync/manage categories."""
 import json
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -25,6 +26,7 @@ async def test_odoo_connection(user: dict = Depends(get_current_user)):
 
 
 @router.post("/odoo/push-products")
+@record_outbound('push_to_odoo')
 async def push_to_odoo(user: dict = Depends(get_current_user)):
     from odoo_service import OdooService
     async with deps.pool.acquire() as conn:
@@ -72,6 +74,7 @@ async def push_to_odoo(user: dict = Depends(get_current_user)):
 
 
 @router.post("/odoo/sync-products")
+@record_outbound('sync_to_odoo')
 async def sync_to_odoo(background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
     from odoo_service import OdooService
     async with deps.pool.acquire() as conn:
@@ -159,3 +162,4 @@ async def bulk_select_odoo_categories(data: dict, user: dict = Depends(get_curre
     async with deps.pool.acquire() as conn:
         await conn.execute('UPDATE odoo_categories SET is_selected = $1, updated_at = NOW() WHERE id = ANY($2)', is_selected, category_ids)
     return {"success": True, "updated": len(category_ids)}
+
