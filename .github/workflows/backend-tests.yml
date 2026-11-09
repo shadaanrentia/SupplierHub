@@ -1,10 +1,12 @@
-
-name: SupplierHub Backend Unit Tests
+name: SupplierHub Backend and Regression Tests
 
 on:
   push:
     branches:
       - test/unit-testing
+      - chore/organize-tests
+      - develop
+      - main
 
   pull_request:
     branches:
@@ -22,20 +24,20 @@ concurrency:
 
 jobs:
   backend-unit:
-    name: Backend Unit Tests
+    name: Backend Unit and Regression Tests
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     defaults:
       run:
+        shell: pwsh
         working-directory: backend
 
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       LIGHTSPEED_VERIFY_INVENTORY_READBACK: "0"
 
-      # Deliberately invalid test-only configuration.
-      # No production credentials or database.
+      # Test-only configuration. Never use a production database here.
       DATABASE_URL: "postgresql://invalid:invalid@127.0.0.1:1/ci_blocked"
 
     steps:
@@ -51,18 +53,17 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
 
-      - name: Install dependencies
+      - name: Install application dependencies
         run: |
-          python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pytest pytest-asyncio pytest-cov
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install pytest pytest-asyncio pytest-cov pglast
 
       - name: Compile critical modules
         run: |
-          python -m py_compile lightspeed_service.py
-          python -m py_compile multi_family.py
-          python -m py_compile single_family.py
-          python -m py_compile export_safety.py
+          python -m compileall -q lightspeed_service.py multi_family.py single_family.py export_safety.py
 
       - name: Run P0 safety tests
         run: |
@@ -71,3 +72,38 @@ jobs:
       - name: Run complete unit suite with coverage
         run: |
           python -m pytest tests/unit -q --tb=short --cov=multi_family --cov=single_family --cov=export_safety --cov=lightspeed_service --cov=inventory_verification --cov=sku_eligibility --cov=pricing_rules --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Run isolated regression tests
+        run: |
+          python -m pytest tests/regression -q --tb=short
+
+  frontend-regression:
+    name: JavaScript Regression Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run JavaScript regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          files=(frontend/tests/unit/test_*.mjs)
+
+          if (( ${#files[@]} == 0 )); then
+            echo "No JavaScript regression tests found."
+            exit 1
+          fi
+
+          node --test "${files[@]}"
