@@ -149,3 +149,25 @@ frontend/node_modules/.cache/default-development/8.pack
 credentials.json
 *.key
 .credentials
+
+# Generated test output
+.coverage
+.coverage.*
+coverage.xml
+coverage/
+htmlcov/
+.pytest_cache/
+test_reports/
+backend/tests/reports/
+playwright-report/
+test-results/
+
+# Local backups and one-time helpers
+.supplierhub-ui-backups/
+/apply_supplierhub_*.py
+/apply_export_review_performance_fix.py
+/apply_image_fix.py
+/reorganize-tests.ps1
+
+# Private/local documents
+/imran-test.txt
