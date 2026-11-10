@@ -34,10 +34,12 @@ async def filter_options(supplier_id:Optional[str]=None,category:Optional[str]=N
     from size_order import size_key
     where,args,_=catalog_filter({'supplier_id':supplier_id,'category':category,'brand':brand})
     async with deps.pool.acquire() as conn:
-        rows=await conn.fetch("""SELECT DISTINCT BTRIM(REGEXP_REPLACE(COALESCE(v.color,''),'^[~[:space:]]+','','g')) colour,
+        rows=await conn.fetch("""SELECT DISTINCT BTRIM(COALESCE(v.color,'')) colour,
             BTRIM(COALESCE(v.size,'')) size FROM product_variants v JOIN products p ON p.id=v.product_id WHERE """+where,*args)
         unassigned=bool(await conn.fetchval('SELECT EXISTS(SELECT 1 FROM products p WHERE NOT EXISTS(SELECT 1 FROM suppliers s WHERE s.id=p.supplier_id))'))
-    return {'colours':sorted({r['colour'] for r in rows if r['colour']},key=str.casefold),
+    from media_links import normalize_colour_label
+    colours={normalize_colour_label(r['colour']) for r in rows if r['colour']}
+    return {'colours':sorted(colours,key=str.casefold),
             'sizes':sorted({r['size'] for r in rows if r['size']},key=size_key),'unassigned_supplier':unassigned}
 
 
