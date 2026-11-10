@@ -23,6 +23,7 @@ import Register from "@/pages/Register";
 import ForgotPassword from "@/pages/ForgotPassword";
 import Users from "@/pages/Users";
 import ExportReview from "@/pages/ExportReview";
+import LightspeedCleanupReview from "@/pages/LightspeedCleanupReview";
 
 function PageTitle() {
   const { pathname } = useLocation();
@@ -40,6 +41,7 @@ function PageTitle() {
       "/category-mapping": "Category Mapping",
       "/preprocessing": "Pre-processing",
       "/export-review": "Export Review",
+      "/lightspeed-cleanup-review": "Lightspeed Cleanup Review",
       "/settings": "Settings",
       "/users": "Users",
       "/login": "Sign In",
@@ -111,6 +113,7 @@ function App() {
               <Route path="/sync-history" element={<SyncHistory />} />
               <Route path="/category-mapping" element={<CategoryMapping />} />
               <Route path="/export-review" element={<ExportReview />} />
+              <Route path="/lightspeed-cleanup-review" element={<LightspeedCleanupReview />} />
               <Route path="/preprocessing" element={<ProductPreprocessing />} />
               <Route path="/settings" element={<Settings />} />
               {user.role === "admin" && <Route path="/users" element={<Users />} />}
