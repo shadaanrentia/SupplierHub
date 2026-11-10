@@ -314,6 +314,11 @@ async def get_product(
         )
         from inventory_selection import select_inventory
         variants = select_inventory(variants, preferred_warehouse, strict=False)
+        from sku_eligibility import eligibility_reason
+        for variant in variants:
+            reason = eligibility_reason(variant)
+            variant["lightspeed_eligible"] = reason is None
+            variant["lightspeed_eligibility_reason"] = reason
         product["variants"] = [display_variant_labels(v) for v in variants]
         product["media"] = media
         product["preferred_warehouse"] = preferred_warehouse
