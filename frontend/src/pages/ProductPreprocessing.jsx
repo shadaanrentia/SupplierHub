@@ -186,6 +186,7 @@ export default function ProductPreprocessing() {
         </div>
         <div className="pp-header-actions flex gap-2">
           <a href="/export-review" className="pp-review-link">Export Review</a>
+          <a href="/lightspeed-cleanup-review" className="pp-review-link">Lightspeed Cleanup Review</a>
           <Button 
             variant="outline" 
             onClick={recalculatePrices}
