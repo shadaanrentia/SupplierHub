@@ -73,6 +73,7 @@ export default function ProductPreprocessing() {
       if (statusFilter !== "all") {
         params.append("status", statusFilter);
       }
+      if (oversizedOnly) params.append("oversized", "true");
       const res = await axios.get(`${API}/preprocessing/products?${params}`);
       if(version!==requestVersion.current) return;
       setProducts(res.data.products || []);
