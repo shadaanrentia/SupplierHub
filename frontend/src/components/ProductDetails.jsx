@@ -245,6 +245,7 @@ function Variants({ rows }) {
                 "Supplier price",
                 "Retail price",
                 "Stock · Mississauga",
+                "Lightspeed eligibility",
               ].map((label) => (
                 <th key={label}>{label}</th>
               ))}
@@ -259,6 +260,16 @@ function Variants({ rows }) {
                 <td>{money(v.price)}</td>
                 <td className="wb-retail">{money(v.computed_retail)}</td>
                 <td>{v.inventory ?? "—"}</td>
+                <td>
+                  <StatusPill
+                    value={v.lightspeed_eligible ? "ready" : "needs_review"}
+                    label={
+                      v.lightspeed_eligible
+                        ? "Eligible"
+                        : (v.lightspeed_eligibility_reason || "Ineligible").replaceAll("_", " ")
+                    }
+                  />
+                </td>
               </tr>
             ))}
           </tbody>
