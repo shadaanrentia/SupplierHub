@@ -8,13 +8,13 @@ def usable(value):
 
 
 def colour_key(value):
-    return re.sub(r'\s+', ' ', re.sub(r"^[\\s~'’‘`]+", '', str(value or ''))).strip().casefold()
+    return re.sub(r'\s+', ' ', re.sub(r"^[\s~'’‘`]+", '', str(value or ''))).strip().casefold()
 
 
 def normalize_colour_label(value):
     """Normalize display casing/prefix punctuation while preserving combined colours."""
-    value = re.sub(r"^[\\s~'’‘`]+", '', str(value or ''))
-    value = re.sub(r'\\s+', ' ', value).strip().rstrip('.').strip()
+    value = re.sub(r"^[\s~'’‘`]+", '', str(value or ''))
+    value = re.sub(r'\s+', ' ', value).strip().rstrip('.').strip()
     if not value:
         return ''
     def tidy(component):
