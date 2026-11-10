@@ -122,7 +122,7 @@ async def _review_listing(search, oversized, issues_only, page, supplier_id=None
             states=await load_readiness(conn,batch,include_assets=False)
             for product in batch:
                 state=states[product['id']]
-                if oversized and state['variants_count'] < LIMIT:continue
+                if oversized and state['variants_count'] <= LIMIT:continue
                 if issues_only and state['is_valid'] and not state['previous_export_failed'] and state.get('status')!='images_pending':continue
                 if start<=total<start+50:
                     product.update(public_state(state))
@@ -459,13 +459,16 @@ async def resolve_group(product_id:str, body:GroupResolution, user=Depends(get_a
             group=await conn.fetchrow("SELECT * FROM lightspeed_export_groups WHERE id=$1 AND product_id=$2 AND store_domain=$3 AND state='uncertain' FOR UPDATE",body.group_id,product_id,ls.domain_prefix)
             if not group:raise HTTPException(409,'Group is not uncertain; refresh')
             ids=set(str(i) for i in decode(group['variant_ids']))
-            skus=[v['variant_sku'] for v in variants if str(v['id']) in ids]
+            group_variants=[v for v in variants if str(v['id']) in ids]
+            skus=[v['variant_sku'] for v in group_variants]
             if len(skus)!=len(ids):raise HTTPException(409,'Source variants changed; migration review required')
             try:
                 if body.destination_id:
                     family=await asyncio.to_thread(ls.remote_family,body.destination_id)
-                    remote={str(v.get('sku') or '').casefold() for v in family.get('products',[])}
-                    if remote != {str(s).casefold() for s in skus} or family.get('name') != product['product_name']+f" — Group {group['group_number']:02d}":
+                    remote={str(v.get('sku') or '').strip().casefold() for v in family.get('products',[])}
+                    from multi_family import family_name
+                    expected_name=family_name(product,group,group_variants)
+                    if remote != {str(s).strip().casefold() for s in skus} or family.get('name') != expected_name:
                         raise ValueError('Remote family name or variant SKUs do not match this group')
                 else:
                     await asyncio.to_thread(ls.assert_split_skus_available,skus+[group['export_sku']])
