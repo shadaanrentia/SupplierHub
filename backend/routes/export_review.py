@@ -9,7 +9,11 @@ from deps import get_admin_user, get_current_user, new_id, row_to_dict
 from export_safety import decode, grouped_variants, validate_prices, repair_images, image_key, export_name, LIMIT
 
 from product_readiness import load_readiness, public_state
-from sku_eligibility import eligible_variants
+from sku_eligibility import (
+    eligible_variants,
+    eligibility_reason,
+    new_export_eligible_variants,
+)
 
 router = APIRouter(prefix='/api/export-review', tags=['Export review'])
 
@@ -41,6 +45,60 @@ async def snapshot(conn, product_id):
     images = [row_to_dict(r) for r in await conn.fetch("SELECT * FROM product_media WHERE product_id=$1 AND media_type='image' ORDER BY is_primary DESC,created_at",product_id)]
     return product, eligible_variants(variants), images
 
+async def new_split_snapshot(conn, product_id):
+    """
+    Return a strict snapshot for creating new Lightspeed split groups.
+
+    Every active supplier variant must be eligible for a new export.
+    Zero-stock and otherwise ineligible variants must not silently
+    disappear from a split plan.
+    """
+    product, _, images = await snapshot(conn, product_id)
+
+    raw_rows = await conn.fetch(
+        """
+        SELECT *
+        FROM product_variants
+        WHERE product_id = $1
+          AND is_active IS DISTINCT FROM FALSE
+        ORDER BY variant_sku, id
+        """,
+        product_id,
+    )
+
+    active_variants = [row_to_dict(row) for row in raw_rows]
+    eligible = new_export_eligible_variants(active_variants)
+
+    eligible_ids = {str(v["id"]) for v in eligible}
+
+    excluded = [
+        v for v in active_variants
+        if str(v["id"]) not in eligible_ids
+    ]
+
+    if excluded:
+        details = []
+        for variant in excluded[:20]:
+            sku = variant.get("variant_sku") or variant.get("id")
+            reason = eligibility_reason(variant) or "not eligible for new export"
+            details.append(f"{sku}: {reason}")
+
+        suffix = (
+            f"; and {len(excluded) - 20} more"
+            if len(excluded) > 20
+            else ""
+        )
+
+        raise HTTPException(
+            400,
+            "Split plan blocked. Resolve all ineligible active variants "
+            "before creating new Lightspeed groups: "
+            + "; ".join(details)
+            + suffix,
+        )
+
+    return product, eligible, images
+
 
 def fingerprint(product, variants):
     return hashlib.sha256(json.dumps([product['id'],product.get('lightspeed_product_id'),[(v['id'],v['variant_sku'],v.get('color'),v.get('size')) for v in variants], 'size_families'],sort_keys=True).encode()).hexdigest()
@@ -64,7 +122,7 @@ async def _review_listing(search, oversized, issues_only, page, supplier_id=None
             states=await load_readiness(conn,batch,include_assets=False)
             for product in batch:
                 state=states[product['id']]
-                if oversized and state['variants_count']<LIMIT:continue
+                if oversized and state['variants_count'] < LIMIT:continue
                 if issues_only and state['is_valid'] and not state['previous_export_failed'] and state.get('status')!='images_pending':continue
                 if start<=total<start+50:
                     product.update(public_state(state))
@@ -211,7 +269,7 @@ async def cleanup_preview(search: str='', supplier_id: str=None, page: int=Query
 async def split_preview(product_id:str,user=Depends(get_admin_user)):
     ls=await service()
     async with deps.pool.acquire() as conn:
-        product,variants,images=await snapshot(conn,product_id)
+        product, variants, images = await new_split_snapshot(conn, product_id)
         existing=await conn.fetchval('SELECT COUNT(*) FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2',product_id,ls.domain_prefix)
     async with deps.pool.acquire() as conn:
         saved=[dict(r) for r in await conn.fetch('SELECT * FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2',product_id,ls.domain_prefix)]
@@ -219,10 +277,18 @@ async def split_preview(product_id:str,user=Depends(get_admin_user)):
     if product.get('lightspeed_product_id') or running or any(g.get('lightspeed_product_id') or g['state']!='planned' for g in saved):
         raise HTTPException(409,'Only unexported planned groups can be rebuilt. Exported/running/uncertain results need migration review')
     if len(variants)<=LIMIT:
-        raise HTTPException(400,'This page splits products with more than 200 eligible variants')
+        raise HTTPException(400,f'This page splits products with more than {LIMIT} eligible variants')
     if len({str(v['variant_sku']).strip().casefold() for v in variants})!=len(variants):
         raise HTTPException(400,'Resolve duplicate variant SKUs first')
     groups=grouped_variants(variants)
+    if not groups or any(
+        not 0 < len(group) <= LIMIT
+        for group in groups
+    ):
+        raise HTTPException(
+            400,
+            f'Generated split groups must contain between 1 and {LIMIT} variants'
+        )
     from multi_family import family_name
     return {'replaces_unexported_plan':bool(saved),'digest':fingerprint(product,variants),'store_domain':ls.domain_prefix,'groups':[
         {'number':i,'name':family_name(product, {'group_number':i,'export_mode':'size_families'}, rows),'count':len(rows),
@@ -237,27 +303,143 @@ class Commit(BaseModel):
     store_domain:str
 
 
+
 @router.post('/products/{product_id}/split-plan')
-async def split_plan(product_id:str,body:Commit,user=Depends(get_admin_user)):
-    ls=await service()
-    if ls.domain_prefix!=body.store_domain:raise HTTPException(409,'Store changed; preview again')
+async def split_plan(product_id: str, body: Commit, user=Depends(get_admin_user)):
+    ls = await service()
+
+    if ls.domain_prefix != body.store_domain:
+        raise HTTPException(409, 'Store changed; preview again')
+
     async with deps.pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute('SELECT pg_advisory_xact_lock(hashtext($1))','export-review:'+product_id)
-            product,variants,images=await snapshot(conn,product_id)
-            if fingerprint(product,variants)!=body.digest:raise HTTPException(409,'Variants changed; preview again')
-            saved=await conn.fetch('SELECT * FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2 FOR UPDATE',product_id,ls.domain_prefix)
-            running=await conn.fetchval("SELECT COUNT(*) FROM lightspeed_review_jobs WHERE product_id=$1 AND status='running'",product_id)
-            if product.get('lightspeed_product_id') or running or any(g.get('lightspeed_product_id') or g['state']!='planned' for g in saved):
-                raise HTTPException(409,'Exported/running/uncertain groups cannot be replaced')
+            await conn.execute(
+                'SELECT pg_advisory_xact_lock(hashtext($1))',
+                'export-review:' + product_id,
+            )
+
+            product, variants, images = await new_split_snapshot(
+                conn, product_id
+            )
+
+            if fingerprint(product, variants) != body.digest:
+                raise HTTPException(409, 'Variants changed; preview again')
+
+            if product.get('lightspeed_product_id'):
+                raise HTTPException(
+                    409,
+                    'Product already exported; migration review required'
+                )
+
+            if len(variants) <= LIMIT:
+                raise HTTPException(
+                    400,
+                    f'No longer oversized; split plans require more than {LIMIT} eligible variants'
+                )
+
+            # Revalidate SKU uniqueness at commit time.
+            skus = [
+                str(v.get('variant_sku') or '').strip().casefold()
+                for v in variants
+            ]
+
+            if any(not sku for sku in skus) or len(skus) != len(set(skus)):
+                raise HTTPException(
+                    400,
+                    'Resolve missing or duplicate variant SKUs before saving the split plan'
+                )
+
+            groups = grouped_variants(variants)
+
+            # Every group must respect the Lightspeed family limit.
+            if not groups or any(
+                not 0 < len(group) <= LIMIT
+                for group in groups
+            ):
+                raise HTTPException(
+                    400,
+                    f'Generated split groups must contain between 1 and {LIMIT} variants'
+                )
+
+            # Every source variant must occur exactly once.
+            source_ids = [str(v['id']) for v in variants]
+            grouped_ids = [
+                str(v['id'])
+                for group in groups
+                for v in group
+            ]
+
+            if (
+                len(grouped_ids) != len(set(grouped_ids))
+                or set(grouped_ids) != set(source_ids)
+            ):
+                raise HTTPException(
+                    400,
+                    'Generated groups do not contain every source variant exactly once'
+                )
+
+            # Only now inspect existing saved groups.
+            saved = await conn.fetch(
+                '''
+                SELECT *
+                FROM lightspeed_export_groups
+                WHERE product_id=$1 AND store_domain=$2
+                FOR UPDATE
+                ''',
+                product_id,
+                ls.domain_prefix,
+            )
+
+            running = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM lightspeed_review_jobs
+                WHERE product_id=$1 AND status='running'
+                """,
+                product_id,
+            )
+
+            if running or any(
+                g.get('lightspeed_product_id')
+                or g['state'] != 'planned'
+                for g in saved
+            ):
+                raise HTTPException(
+                    409,
+                    'Exported/running/uncertain groups cannot be replaced'
+                )
+
+            # All validation has passed. Replace only unexported plans.
             if saved:
-                await conn.execute('DELETE FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2',product_id,ls.domain_prefix)
-            if len(variants)<=LIMIT:raise HTTPException(400,'No longer oversized')
-            for number,rows in enumerate(grouped_variants(variants),1):
-                export_sku=f"SH-{product_id}-G{number:03d}"
-                await conn.execute('''INSERT INTO lightspeed_export_groups(id,product_id,store_domain,group_number,export_sku,variant_ids,export_mode)
-                    VALUES($1,$2,$3,$4,$5,$6::jsonb,'size_families')''',new_id(),product_id,ls.domain_prefix,number,export_sku,json.dumps([v['id'] for v in rows]))
-    return {'success':True}
+                await conn.execute(
+                    '''
+                    DELETE FROM lightspeed_export_groups
+                    WHERE product_id=$1 AND store_domain=$2
+                    ''',
+                    product_id,
+                    ls.domain_prefix,
+                )
+
+            for number, rows in enumerate(groups, 1):
+                export_sku = f"SH-{product_id}-G{number:03d}"
+
+                await conn.execute(
+                    '''
+                    INSERT INTO lightspeed_export_groups
+                    (id, product_id, store_domain, group_number,
+                     export_sku, variant_ids, export_mode)
+                    VALUES ($1,$2,$3,$4,$5,$6::jsonb,'size_families')
+                    ''',
+                    new_id(),
+                    product_id,
+                    ls.domain_prefix,
+                    number,
+                    export_sku,
+                    json.dumps([v['id'] for v in rows]),
+                )
+
+    return {'success': True}
+
 
 
 class GroupResolution(BaseModel):

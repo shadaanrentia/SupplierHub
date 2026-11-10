@@ -23,6 +23,7 @@ class Conn:
   self.db=sqlite3.connect(':memory:');self.db.row_factory=sqlite3.Row;self.queries=[];self.transactions=[]
   self.db.create_function('BTRIM',1,lambda v:str(v).strip() if v is not None else None)
   self.db.create_function('REGEXP_REPLACE',4,lambda text,pattern,value,flags:re.sub(r'^[~\s]+','',text))
+  self.db.create_function('chr', 1, lambda code: chr(int(code)))
   self.db.executescript('''CREATE TABLE suppliers(id TEXT,supplier_name TEXT,last_sync TEXT);
    CREATE TABLE products(id TEXT,product_name TEXT,supplier_sku TEXT,supplier_id TEXT,category TEXT,brand TEXT,
      base_price REAL,currency TEXT,created_at TEXT,updated_at TEXT,selected_for_odoo BOOLEAN,odoo_sync_status TEXT);

@@ -9,7 +9,8 @@ from size_order import size_key, sort_variants
 from sku_eligibility import eligible_variants
 from deps import row_to_dict, calculate_sale_price
 
-LIMIT = 200
+MAX_VARIANTS_PER_FAMILY = 199
+LIMIT = MAX_VARIANTS_PER_FAMILY
 
 
 def decode(value):
@@ -44,21 +45,51 @@ def validate_prices(product, variants):
 
 
 def grouped_variants(variants):
-    """Pack whole sizes in natural order. Split a size only if it alone exceeds 200."""
+    """
+    Pack whole sizes in natural order without exceeding the
+    Lightspeed maximum of 199 variants per family.
+
+    Split a size only when that size cannot fit into the
+    remaining capacity or exceeds the maximum itself.
+
+    Every variant must appear exactly once.
+    """
     sizes = {}
-    for variant in sorted(variants, key=lambda v: (size_key(v.get('size')), str(v.get('color') or '').casefold(), str(v.get('variant_sku') or '').casefold())):
-        sizes.setdefault(size_key(variant.get('size')), []).append(variant)
-    groups, current = [], []
+
+    for variant in sorted(
+        variants,
+        key=lambda v: (
+            size_key(v.get("size")),
+            str(v.get("color") or "").casefold(),
+            str(v.get("variant_sku") or "").casefold(),
+        ),
+    ):
+        sizes.setdefault(size_key(variant.get("size")), []).append(variant)
+
+    groups = []
+    current = []
+
     for rows in sizes.values():
         if len(rows) > LIMIT:
             if current:
-                groups.append(current); current = []
-            groups.extend(rows[i:i+LIMIT] for i in range(0, len(rows), LIMIT))
+                groups.append(current)
+                current = []
+
+            groups.extend(
+                rows[i:i + LIMIT]
+                for i in range(0, len(rows), LIMIT)
+            )
+
         elif len(current) + len(rows) > LIMIT:
-            groups.append(current); current = list(rows)
+            groups.append(current)
+            current = list(rows)
+
         else:
             current.extend(rows)
-    if current: groups.append(current)
+
+    if current:
+        groups.append(current)
+
     return groups
 
 
@@ -134,12 +165,42 @@ async def repair_images(ls, destination_id, images):
     return await repair_assets(ls,destination_id,images)
 
 
-async def _legacy_export_product(ls, product, variants, images, markup, category_id):
+async def _legacy_export_product(
+    ls,
+    product,
+    variants,
+    images,
+    markup,
+    category_id,
+    allow_zero_inventory=False,
+):
     """Shared entry point used by normal pushes and the split-export page."""
-    active = [dict(v) for v in variants if v.get('is_active') is not False]
-    variants = eligible_variants(active)
+    from sku_eligibility import (
+    eligible_variants,
+    new_export_eligible_variants,
+    )
+
+    active = [
+        dict(v)
+        for v in variants
+        if v.get("is_active") is not False
+    ]
+
+    if allow_zero_inventory:
+        # Existing Lightspeed product: retain zero-stock variants
+        # so inventory reconciliation can send quantity 0.
+        variants = eligible_variants(active)
+    else:
+        # New Lightspeed product: only positive-stock variants
+        # may be included in the initial creation.
+        variants = new_export_eligible_variants(active)
+
     if active and not variants:
-        raise ValueError('All active variants are currently ineligible: each needs a valid positive price and positive inventory')
+        raise ValueError(
+            "All variant SKUs are temporarily excluded: "
+            "new Lightspeed products require a valid positive price "
+            "and positive inventory."
+        )
     from media_links import normalize_colour_label
     for variant in variants:
         variant['color'] = normalize_colour_label(variant.get('color'))
@@ -154,7 +215,9 @@ async def _legacy_export_product(ls, product, variants, images, markup, category
     async with deps.pool.acquire() as conn:
         groups = [dict(r) for r in await conn.fetch('SELECT * FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2 ORDER BY group_number', product['id'],ls.domain_prefix)]
     if len(variants) > LIMIT and not groups:
-        raise ValueError('200+ variants: preview and save a split plan in Export Review first')
+        raise ValueError(
+            f'{LIMIT + 1}+ variants: preview and save a split plan in Export Review first'
+        )
     if groups:
         all_ids = [str(i) for g in groups for i in decode(g['variant_ids'])]
         if len(all_ids) != len(set(all_ids)) or set(all_ids) != {str(v['id']) for v in variants}:
@@ -173,7 +236,9 @@ async def _legacy_export_product(ls, product, variants, images, markup, category
         group_variants = [by_id[str(i)] for i in decode(group['variant_ids'])] if group else variants
         group_variants = sort_variants(group_variants)
         if len(group_variants) > LIMIT:
-            raise ValueError('Saved group exceeds the configured limit of 199')
+            raise ValueError(
+                f'Saved group exceeds the configured limit of {LIMIT}'
+            )
         if group:
             async with deps.pool.acquire() as conn:
                 claimed = await conn.fetchval("UPDATE lightspeed_export_groups SET state='running',message='',updated_at=NOW() WHERE id=$1 AND state NOT IN ('running','uncertain') RETURNING id",group['id'])
@@ -302,7 +367,15 @@ async def export_product(ls, product, variants, images, markup, category_id):
         if not await conn.fetchval('SELECT pg_try_advisory_lock(hashtext($1))', lock):
             raise ValueError('This product is already exporting; wait for that job')
         try:
-            return await _legacy_export_product(ls, product, variants, images, markup, category_id)
+            return await _legacy_export_product(
+                ls,
+                product,
+                variants,
+                images,
+                markup,
+                category_id,
+                allow_zero_inventory=bool(product.get("lightspeed_product_id")),
+            )
         finally:
             await conn.execute('SELECT pg_advisory_unlock(hashtext($1))', lock)
 

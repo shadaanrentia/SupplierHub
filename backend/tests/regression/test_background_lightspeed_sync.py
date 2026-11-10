@@ -163,10 +163,27 @@ class MatchingTests(unittest.TestCase):
         self.assertEqual(set(result['source_part_ids']),{'a','b'})
 
 class ReadinessTests(unittest.TestCase):
-    def state(self,category='p',stock=3):
-        ns=extract('product_readiness.py',{'evaluate'},{'sort_variants':lambda x:x,'eligible_variants':lambda x:x,
-            'skip_sku':lambda x:False,'validate_prices':lambda *args:None,'LIMIT':200,'math':__import__('math')})
-        return ns['evaluate']({'product_name':'P','supplier_sku':'SKU'},[{'id':'a','inventory':stock}],[],[],category)
+    def state(self, category='p', stock=3):
+        ns = extract(
+            'product_readiness.py',
+            {'evaluate'},
+            {
+                'sort_variants': lambda x: x,
+                'eligible_variants': lambda x: x,
+                'new_export_eligible_variants': lambda x: x,
+                'skip_sku': lambda x: False,
+                'validate_prices': lambda *args: None,
+                'LIMIT': 200,
+                'math': __import__('math'),
+            },
+        )
+        return ns['evaluate'](
+            {'product_name': 'P', 'supplier_sku': 'SKU'},
+            [{'id': 'a', 'inventory': stock}],
+            [],
+            [],
+            category,
+        )
     def test_images_do_not_block_details(self):self.assertTrue(self.state()['is_valid'])
     def test_category_validation_remains(self):self.assertFalse(self.state(category=None)['is_valid'])
     def test_inventory_validation_remains(self):self.assertFalse(self.state(stock=-1)['is_valid'])

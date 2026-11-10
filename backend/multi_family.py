@@ -90,7 +90,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 group_started=time.perf_counter()
                 selected = {str(i) for i in decode(group['variant_ids'])}
                 batch = sort_variants([dict(v) for v in variants if str(v['id']) in selected])
-                if not 0 < len(batch) <= LIMIT: raise ValueError('Each family must contain 1–200 eligible variants')
+                if not 0 < len(batch) <= LIMIT: raise ValueError(f'Each family must contain 1–{LIMIT} eligible variants')
                 name = family_name(product, group, batch)
                 destination = group.get('lightspeed_product_id')
                 # A stored, live destination is reconciled by member IDs and exact SKUs,
@@ -154,7 +154,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
                         raise ValueError('Created family readback did not match reviewed group')
                 remote = members(family)
                 missing = [v for v in batch if sku(v) not in remote]
-                if len(remote) + len(missing) > LIMIT: raise ValueError('Family would exceed 200 variants')
+                if len(remote) + len(missing) > LIMIT: raise ValueError(f'Family would exceed the maximum of {LIMIT} variants')
                 if missing:
                     for v in missing:
                         journal = await conn.fetchrow('SELECT state FROM lightspeed_family_additions WHERE product_id=$1 AND store_domain=$2 AND variant_sku=$3',key,domain,sku(v))

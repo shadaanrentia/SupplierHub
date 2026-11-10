@@ -3,12 +3,11 @@
 SupplierHub 2.0 - Size-Based Export Splitting Tests
 
 Rules:
-- Maximum 200 variants per export group
+- Maximum 199 variants per export group
 - Preserve whole sizes whenever possible
 - Preserve every variant exactly once
 - Maintain natural size order
-- Produce deterministic groups
-"""
+- Produce deterministic groups"""
 
 from collections import Counter
 
@@ -51,9 +50,10 @@ def flatten(groups):
     [
         (1, 1),
         (199, 1),
-        (200, 1),
+        (200, 2),
         (201, 2),
-        (400, 2),
+        (398, 2),
+        (399, 3),
         (501, 3),
     ],
 )
@@ -64,8 +64,7 @@ def test_variant_count_boundaries(count, expected_groups):
     assert len(groups) == expected_groups
     assert len(flatten(groups)) == count
 
-    assert all(0 < len(g) <= 200 for g in groups)
-
+    assert all(0 < len(g) <= 199 for g in groups)
 
 def test_keep_whole_sizes_together():
     variants = make_variants({
@@ -79,15 +78,16 @@ def test_keep_whole_sizes_together():
     groups = grouped_variants(variants)
 
     assert len(groups) == 2
-    assert len(groups[0]) == 200
-    assert len(groups[1]) == 50
+    assert len(groups[0]) == 150
+    assert len(groups[1]) == 100
 
     assert {v["size"] for v in groups[0]} == {
-        "S", "M", "L", "XL"
+        "S", "M", "L"
     }
 
-    assert {v["size"] for v in groups[1]} == {"2XL"}
-
+    assert {v["size"] for v in groups[1]} == {
+        "XL", "2XL"
+    }
 
 def test_do_not_split_size_that_fits():
     variants = make_variants({
@@ -109,12 +109,14 @@ def test_oversized_single_size():
 
     groups = grouped_variants(variants)
 
-    assert [len(g) for g in groups] == [200, 50]
+    assert [len(g) for g in groups] == [199, 51]
 
     assert all(
         v["size"] == "XL"
         for v in flatten(groups)
     )
+
+    assert len(flatten(groups)) == 250
 
 
 def test_no_missing_or_duplicate_variants():

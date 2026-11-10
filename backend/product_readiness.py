@@ -7,7 +7,12 @@ from collections import defaultdict
 from export_safety import validate_prices, export_name, LIMIT
 from sanmar_taxonomy import sku_key
 from size_order import sort_variants
-from sku_eligibility import eligible_variants, skip_sku
+from sku_eligibility import (
+    eligible_variants,
+    eligibility_reason,
+    new_export_eligible_variants,
+    skip_sku,
+)
 
 
 def decoded(value):
@@ -15,15 +20,77 @@ def decoded(value):
 
 
 def evaluate(product, variants, images, groups, category_id, category_error=None, image_issues=0):
-    active = [dict(v) for v in variants if v.get('is_active') is not False]
-    skipped = sum(skip_sku(v) for v in active)
-    variants = sort_variants(eligible_variants(active))
+    active = [
+        dict(v)
+        for v in variants
+        if v.get("is_active") is not False
+    ]
+
+    active_by_id = {
+        str(v["id"]): v
+        for v in active
+        if v.get("id") is not None
+    }
+
+    selected_by_id = {}
+    eligibility_errors = []
+
+    if groups:
+        for group in groups:
+            group_ids = [
+                str(value)
+                for value in decoded(group["variant_ids"])
+            ]
+
+            group_variants = [
+                active_by_id[variant_id]
+                for variant_id in group_ids
+                if variant_id in active_by_id
+            ]
+
+            if group.get("lightspeed_product_id"):
+                selected = eligible_variants(group_variants)
+            else:
+                selected = new_export_eligible_variants(group_variants)
+
+                selected_ids = {
+                    str(v["id"])
+                    for v in selected
+                }
+
+                for variant in group_variants:
+                    if str(variant["id"]) not in selected_ids:
+                        reason = eligibility_reason(variant)
+                        eligibility_errors.append(
+                            f"Uncreated export group contains ineligible SKU "
+                            f"{variant.get('variant_sku')}: {reason}"
+                        )
+
+            for variant in selected:
+                selected_by_id[str(variant["id"])] = variant
+
+        variants = list(selected_by_id.values())
+
+    elif product.get("lightspeed_product_id"):
+        variants = eligible_variants(active)
+
+    else:
+        variants = new_export_eligible_variants(active)
+
+    skipped = len(active) - len(variants)
+    variants = sort_variants(variants)
     excluded = bool(active) and not variants
     images = [dict(i) for i in images if i.get('media_type') == 'image' and str(i.get('url') or '').strip()]
     errors = []
+    errors.extend(eligibility_errors)
     if any(v.get('inventory_error') for v in active):
         errors.append('Selected warehouse inventory is missing or invalid; refresh supplier inventory before syncing')
-    if excluded: errors.append('All active variants are currently ineligible: each needs a valid positive price and positive inventory')
+    if excluded:
+        errors.append(
+            "All variant SKUs are temporarily excluded: "
+            "new Lightspeed products require a valid positive price "
+            "and positive inventory."
+        )
     if not str(product.get('product_name') or '').strip(): errors.append('Product name is missing')
     if not str(product.get('supplier_sku') or '').strip(): errors.append('Supplier SKU is missing')
     try: validate_prices(product, variants)
@@ -45,7 +112,15 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
             errors.append('Old shared-family plan: verify deleted destinations in Export Review, then save a new size-family plan')
         try:
             members = [str(i) for group in groups for i in decoded(group['variant_ids'])]
-            complete = len(members) == len(set(members)) and set(members) == {str(v['id']) for v in variants}
+            expected_ids = {
+                str(v["id"])
+                for v in active
+            }
+
+            complete = (
+                len(members) == len(set(members))
+                and set(members) == expected_ids
+            )
             bounded = all(0 < len(decoded(g['variant_ids'])) <= LIMIT for g in groups)
             available = all(g.get('state') in ('planned', 'done', 'uncertain', 'images_pending') for g in groups)
             plan_ready = complete and bounded and available
@@ -59,7 +134,7 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
     valid = not errors
     pending = bool(image_issues) or not images or product.get('lightspeed_sync_status') in ('images_pending','needs_review')
     synced = valid and product.get('lightspeed_sync_status') == 'synced'
-    return {'excluded_from_queue': excluded, 'skipped_variants_count': skipped, 'validation_errors': errors, 'is_valid': valid, 'can_sync': valid and (not synced or pending),
+    return { 'variants': variants,'excluded_from_queue': excluded, 'skipped_variants_count': skipped, 'validation_errors': errors, 'is_valid': valid, 'can_sync': valid and (not synced or pending),
             'status': 'invalid' if errors else ('images_pending' if pending else ('synced' if synced else 'ready')),
             'mapped_lightspeed_category_id': category_id, 'variants_count': len(variants),
             'image_warnings': image_warnings, 'images_count': len(images), 'group_count': len(groups), 'plan_ready': plan_ready,
@@ -134,7 +209,7 @@ async def load_readiness(conn, products, include_assets=True):
         if missing:
             state['validation_errors'].append('The saved Lightspeed category is absent from the current category cache. Refresh categories and review this mapping.')
             state.update(is_valid=False,can_sync=False,status='invalid')
-        results[pid] = {**state, 'mapped_category_name':label, 'variants': sort_variants(eligible_variants(variants[pid])), 'images': [i for i in images[pid] if str(i.get('url') or '').strip()]}
+        results[pid] = {**state, 'mapped_category_name':label, 'variants': state['variants'], 'images': [i for i in images[pid] if str(i.get('url') or '').strip()]}
     return results
 
 

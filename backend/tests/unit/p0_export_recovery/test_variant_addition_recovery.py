@@ -304,7 +304,7 @@ async def test_oversized_group_rejected_before_creation(env):
     result = await run_export(env)
 
     assert result["success"] is False
-    assert "1–200 eligible variants" in result["error"]
+    assert "1–199 eligible variants" in result["error"]
 
     env.ls._create_product.assert_not_awaited()
     assert_no_family_post(env)

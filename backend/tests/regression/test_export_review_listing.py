@@ -50,4 +50,86 @@ class Tests(unittest.IsolatedAsyncioTestCase):
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'review-route','exec'),ns)
         with self.assertRaises(HTTPException) as error:await ns['products'](page=1,user={})
         self.assertEqual(error.exception.status_code,503);self.assertIn('no products were changed',error.exception.detail)
+    async def test_oversized_boundary_199_variants(self):
+        await self.run_boundary_listing(199, expected_included=False)
+
+    async def test_oversized_boundary_200_variants(self):
+        await self.run_boundary_listing(200, expected_included=True)
+
+    async def test_oversized_boundary_201_variants(self):
+        await self.run_boundary_listing(201, expected_included=True)
+
+    async def run_boundary_listing(self, count, expected_included):
+        rows = [{
+            "id": "boundary-product",
+            "supplier_sku": "BOUNDARY-001",
+            "product_name": "Boundary Product",
+        }]
+
+        class Conn:
+            async def fetch(self, sql, *args):
+                return rows
+
+        @asynccontextmanager
+        async def acquire():
+            yield Conn()
+
+        async def readiness(conn, batch, include_assets=True):
+            return {
+                "boundary-product": {
+                    "excluded_from_queue": False,
+                    "variants_count": count,
+                    "is_valid": True,
+                    "previous_export_failed": False,
+                    "status": "ready",
+                    "images_count": 1,
+                }
+            }
+
+        namespace = {
+            "deps": SimpleNamespace(
+                pool=SimpleNamespace(acquire=acquire)
+            ),
+            "row_to_dict": dict,
+            "load_readiness": readiness,
+            "public_state": dict,
+            "export_name": lambda name, sku: name + " " + sku,
+            "LIMIT": 200,
+        }
+
+        tree = ast.parse(
+            (ROOT / "backend" / "routes" / "export_review.py").read_text()
+        )
+
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_review_listing"
+        )
+
+        exec(
+            compile(
+                ast.Module(body=[function], type_ignores=[]),
+                "review-boundary",
+                "exec",
+            ),
+            namespace,
+        )
+
+        result = await namespace["_review_listing"](
+            "",
+            True,
+            False,
+            1,
+        )
+
+        self.assertEqual(
+            len(result["products"]) == 1,
+            expected_included,
+        )
+        self.assertEqual(
+            result["total"],
+            1 if expected_included else 0,
+        )
+
 if __name__=='__main__':unittest.main()
