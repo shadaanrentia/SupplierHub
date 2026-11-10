@@ -11,6 +11,19 @@ def colour_key(value):
     return re.sub(r'\s+', ' ', re.sub(r"^[\\s~'’‘`]+", '', str(value or ''))).strip().casefold()
 
 
+def normalize_colour_label(value):
+    """Normalize display casing/prefix punctuation while preserving combined colours."""
+    value = re.sub(r"^[\\s~'’‘`]+", '', str(value or ''))
+    value = re.sub(r'\\s+', ' ', value).strip().rstrip('.').strip()
+    if not value:
+        return ''
+    def tidy(component):
+        return re.sub(r"(?<![A-Za-z])[A-Za-z][A-Za-z'’-]*",
+                      lambda match: match.group(0)[0].upper() + match.group(0)[1:].lower(),
+                      component)
+    return '/'.join(tidy(part.strip()) for part in value.split('/'))
+
+
 def xml_links(element):
     parts, colours = [], []
     for node in element.iter():
