@@ -31,3 +31,19 @@ def test_image_matching_uses_normalized_combined_colour_without_splitting():
     assert colour == "Black/White"
     assert set(part_ids) == {"STYLE-BW-S", "STYLE-BW-M"}
     assert "STYLE-BR-S" not in part_ids
+
+
+
+def test_display_label_removes_leading_quote_and_normalizes_case():
+    from media_links import normalize_colour_label
+
+    assert normalize_colour_label("'ash") == "Ash"
+    assert normalize_colour_label("`BROWN") == "Brown"
+    assert normalize_colour_label("Black/WHITE.") == "Black/White"
+    assert normalize_colour_label("Women's Black") == "Women's Black"
+
+
+def test_display_label_preserves_combined_colour_as_one_value():
+    from media_links import normalize_colour_label
+
+    assert normalize_colour_label("'black / white") == "Black/White"
