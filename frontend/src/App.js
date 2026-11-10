@@ -113,7 +113,7 @@ function App() {
               <Route path="/sync-history" element={<SyncHistory />} />
               <Route path="/category-mapping" element={<CategoryMapping />} />
               <Route path="/export-review" element={<ExportReview />} />
-              <Route path="/lightspeed-cleanup-review" element={<LightspeedCleanupReview />} />
+              <Route path="/lightspeed-cleanup-review" element={user.role === "admin" ? <LightspeedCleanupReview /> : <Navigate to="/" replace />} />
               <Route path="/preprocessing" element={<ProductPreprocessing />} />
               <Route path="/settings" element={<Settings />} />
               {user.role === "admin" && <Route path="/users" element={<Users />} />}
