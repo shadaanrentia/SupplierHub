@@ -43,6 +43,8 @@ def invalid_inventory(value):
 
 def eligibility_reason(row):
     """Explain why a stored supplier variant cannot be exported to Lightspeed."""
+    if row.get("is_active") is False:
+        return "inactive"
     if row.get("price_needs_review") or missing_price(row.get("price")):
         return "price_missing_or_invalid"
     if invalid_inventory(row.get("inventory")):
