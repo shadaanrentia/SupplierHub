@@ -139,7 +139,10 @@ async def _legacy_export_product(ls, product, variants, images, markup, category
     active = [dict(v) for v in variants if v.get('is_active') is not False]
     variants = eligible_variants(active)
     if active and not variants:
-        raise ValueError('All variant SKUs are temporarily excluded: missing price and zero inventory')
+        raise ValueError('All active variants are currently ineligible: each needs a valid positive price and positive inventory')
+    from media_links import normalize_colour_label
+    for variant in variants:
+        variant['color'] = normalize_colour_label(variant.get('color'))
     validate_prices(product, variants)
     from pricing_rules import prepare_export_pricing
     async with deps.pool.acquire() as pricing_conn:
