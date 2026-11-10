@@ -20,7 +20,6 @@ class HTTPException(Exception):
 
 
 class FakeConnection:
-    
     def __init__(self, saved_groups=None):
         self.executed = []
         self.fetch_calls = []
