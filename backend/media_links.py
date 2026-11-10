@@ -15,6 +15,7 @@ def normalize_colour_label(value):
     """Normalize display casing/prefix punctuation while preserving combined colours."""
     value = re.sub(r"^[\s~'’‘`]+", '', str(value or ''))
     value = re.sub(r'\s+', ' ', value).strip().rstrip('.').strip()
+    value = re.sub(r'\s*/\s*', '/', value)
     if not value:
         return ''
     def tidy(component):
