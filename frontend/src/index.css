@@ -103,7 +103,7 @@ code {
 /* Pre-processing page */
 .pp-page{min-width:0;color:#f4f4f5}
 .pp-page .pp-header-actions{align-items:center;flex-wrap:wrap}
-.pp-review-link{font-size:13px;color:#60a5fa;padding:8px 10px;white-space:nowrap}
+.pp-review-link{font-size:13px;color:#a1a1aa;padding:8px 10px;white-space:nowrap}.pp-review-link:hover{color:#f4f4f5}
 .pp-filters{width:100%;margin-top:12px}
 .pp-search{min-width:240px;flex:1;max-width:480px}
 .pp-result-line{font-size:12px;color:#a1a1aa;min-height:18px;margin:0 0 12px}
