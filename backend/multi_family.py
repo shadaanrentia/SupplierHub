@@ -50,6 +50,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
     from export_format import assert_service_compatible
     assert_service_compatible(ls)
     from export_safety import decode, validate_prices, LIMIT
+    from sku_eligibility import eligibility_reason
     validate_prices(product, variants)
     if not defer_images.get() and not any(i.get('media_type','image') == 'image' and (i.get('url') or i.get('image_base64')) for i in images):
         raise ValueError('No usable source images; refresh supplier media')
@@ -80,6 +81,24 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 raise ValueError('Rebuild the unexported colour plan as size families in Export Review')
             if any(g['state'] == 'running' for g in groups):
                 raise ValueError('Another worker is running; stop it before resuming')
+
+            # Validate every not-yet-created family before any Lightspeed
+            # metadata or product writes. Existing destinations retain zero stock.
+            variants_by_id = {str(v['id']): v for v in variants}
+            for planned_group in groups:
+                if planned_group.get('lightspeed_product_id'):
+                    continue
+                planned_ids = [str(i) for i in decode(planned_group['variant_ids'])]
+                planned_variants = [variants_by_id[i] for i in planned_ids]
+                blocked = [
+                    (v.get('variant_sku') or v.get('id'), eligibility_reason(v))
+                    for v in planned_variants
+                    if eligibility_reason(v)
+                ]
+                if blocked:
+                    details = ', '.join(f'{variant_sku}: {reason}' for variant_sku, reason in blocked[:10])
+                    raise ValueError('New Lightspeed families require valid positive-stock variants: ' + details)
+
             supplier = await asyncio.to_thread(ls._get_or_create_supplier, product.get('supplier_name')) if product.get('supplier_name') else None
             brand = await asyncio.to_thread(ls._get_or_create_brand, product.get('brand')) if product.get('brand') else None
             attrs = await asyncio.to_thread(ls._ensure_variant_attributes, ['Color', 'Size'])
@@ -130,6 +149,16 @@ async def export_families(ls, product, variants, images, markup, category_id):
                     raise ValueError('Previous creation outcome cannot be verified; no duplicate creation sent')
                 await conn.execute("UPDATE lightspeed_export_groups SET state='running',message='Syncing reviewed family',updated_at=NOW() WHERE id=$1",group['id'])
                 if not family:
+                    # A previously saved destination may have been deleted.
+                    # Re-apply new-product rules before recreating that family.
+                    blocked = [
+                        (v.get('variant_sku') or v.get('id'), eligibility_reason(v))
+                        for v in batch
+                        if eligibility_reason(v)
+                    ]
+                    if blocked:
+                        details = ', '.join(f'{variant_sku}: {reason}' for variant_sku, reason in blocked[:10])
+                        raise ValueError('Cannot recreate a Lightspeed family with ineligible variants: ' + details)
                     from deps import calculate_sale_price
                     cost = min(float(v['price']) for v in batch)
                     payload = dict(product, product_name=name, supplier_sku=group['export_sku'], category_id=category_id, effective_markup_percentage=markup)
