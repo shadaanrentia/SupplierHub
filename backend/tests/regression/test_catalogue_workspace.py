@@ -64,7 +64,7 @@ def functions(path,names,ns):
 
 def namespace(conn):return {'deps':types.SimpleNamespace(pool=Pool(conn)),'Query':lambda default,**kw:default,
  'Depends':lambda fn:None,'get_current_user':lambda:None,'HTTPException':HTTPException,'row_to_dict':dict,
- 'display_product_labels':dict,'asyncio':asyncio,'public_state':dict,'export_name':lambda name,sku:name,'LIMIT':200}
+ 'display_product_labels':dict,'asyncio':asyncio,'public_state':dict,'export_name':lambda name,sku:name,'LIMIT':199}
 
 class Filters(unittest.TestCase):
  def setUp(self):self.conn=Conn()
