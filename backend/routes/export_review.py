@@ -150,6 +150,60 @@ async def destination_images(product_id: str, user=Depends(get_admin_user)):
             'source_link_issues':source_link_issues}
 
 
+@router.get('/cleanup-preview')
+async def cleanup_preview(search: str='', supplier_id: str=None, page: int=Query(1,ge=1), user=Depends(get_admin_user)):
+    """Read-only report of remote variants whose current supplier data is ineligible."""
+    ls=await service()
+    from sku_eligibility import eligibility_reason
+    from single_family import members
+    limit=50
+    async with deps.pool.acquire() as conn:
+        products=[row_to_dict(r) for r in await conn.fetch("""SELECT p.id,p.product_name,p.supplier_sku,p.supplier_id,
+            p.lightspeed_product_id,s.supplier_name FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id
+            WHERE (p.product_name ILIKE $1 OR p.supplier_sku ILIKE $1)
+            AND ($2::varchar IS NULL OR p.supplier_id=$2)
+            AND (p.lightspeed_product_id IS NOT NULL OR EXISTS(
+                SELECT 1 FROM lightspeed_export_groups g WHERE g.product_id=p.id AND g.store_domain=$3
+                AND g.lightspeed_product_id IS NOT NULL))
+            ORDER BY p.updated_at DESC,p.id""",'%'+search.strip()+'%',supplier_id,ls.domain_prefix)]
+        total=len(products)
+        visible=products[(page-1)*limit:page*limit]
+        ids=[p['id'] for p in visible]
+        variants_by_product={}
+        for row in await conn.fetch("SELECT * FROM product_variants WHERE product_id=ANY($1::varchar[]) AND is_active IS DISTINCT FROM FALSE ORDER BY product_id,variant_sku",ids):
+            variants_by_product.setdefault(row['product_id'],[]).append(row_to_dict(row))
+        groups_by_product={}
+        for row in await conn.fetch("SELECT product_id,lightspeed_product_id FROM lightspeed_export_groups WHERE product_id=ANY($1::varchar[]) AND store_domain=$2 AND lightspeed_product_id IS NOT NULL",ids,ls.domain_prefix):
+            groups_by_product.setdefault(row['product_id'],[]).append(str(row['lightspeed_product_id']))
+    results=[]
+    for product in visible:
+        variants=variants_by_product.get(product['id'],[])
+        reasons={str(v.get('variant_sku') or '').strip().casefold():eligibility_reason(v) for v in variants}
+        reasons={sku:reason for sku,reason in reasons.items() if sku and reason}
+        destinations=set(groups_by_product.get(product['id'],[]))
+        if product.get('lightspeed_product_id'):destinations.add(str(product['lightspeed_product_id']))
+        remote=[];errors=[]
+        for destination_id in sorted(destinations):
+            try:
+                family=await asyncio.to_thread(ls.remote_family,destination_id)
+                remote_members=members(family)
+                for sku,reason in reasons.items():
+                    item=remote_members.get(sku)
+                    if item:
+                        remote.append({'variant_sku':sku,'lightspeed_variant_id':str(item.get('id')),
+                            'reason':reason,'destination_id':destination_id,'product_name':product.get('product_name'),
+                            'supplier_sku':product.get('supplier_sku')})
+            except Exception as exc:
+                errors.append({'destination_id':destination_id,'message':str(exc)[:1000]})
+        if remote or errors:
+            results.append({'product_id':product['id'],'product_name':product.get('product_name'),
+                'supplier_sku':product.get('supplier_sku'),'supplier_name':product.get('supplier_name'),
+                'candidates':remote,'errors':errors})
+    return {'products':results,'page':page,'limit':limit,'total_products_checked':len(visible),
+        'matched_products':len(results),'deletion_enabled':False,
+        'notice':'Read-only preview. No Lightspeed variants were changed or deleted.'}
+
+
 @router.post('/products/{product_id}/split-preview')
 async def split_preview(product_id:str,user=Depends(get_admin_user)):
     ls=await service()
