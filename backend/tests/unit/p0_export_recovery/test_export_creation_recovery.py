@@ -138,7 +138,7 @@ def environment(monkeypatch):
             "size": "M",
             "color": "Black",
             "price": 10.0,
-            "inventory": 0,
+            "inventory": 5,
         },
     ]
 
