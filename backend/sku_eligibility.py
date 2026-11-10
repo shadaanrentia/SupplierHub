@@ -29,7 +29,7 @@ def missing_price(value):
 
 
 def invalid_inventory(value):
-    """Reject missing, malformed, non-finite or negative or fractional stock."""
+    """Reject missing, malformed, non-finite, zero, negative or fractional stock."""
     if value is None or isinstance(value, bool):
         return True
 
@@ -38,15 +38,25 @@ def invalid_inventory(value):
     except (ValueError, TypeError, OverflowError):
         return True
 
-    return not math.isfinite(inventory) or inventory < 0 or not inventory.is_integer()
+    return not math.isfinite(inventory) or inventory <= 0 or not inventory.is_integer()
+
+
+def eligibility_reason(row):
+    """Explain why a stored supplier variant cannot be exported to Lightspeed."""
+    if row.get("price_needs_review") or missing_price(row.get("price")):
+        return "price_missing_or_invalid"
+    if invalid_inventory(row.get("inventory")):
+        try:
+            quantity = float(row.get("inventory"))
+        except (TypeError, ValueError, OverflowError):
+            return "inventory_missing_or_invalid"
+        return "inventory_zero" if math.isfinite(quantity) and quantity == 0 else "inventory_missing_or_invalid"
+    return None
 
 
 def skip_sku(row):
-    """Skip a SKU when either price or stock is invalid."""
-    return (
-        missing_price(row.get("price"))
-        or invalid_inventory(row.get("inventory"))
-    )
+    """Keep the source row in SupplierHub, but block export when ineligible."""
+    return eligibility_reason(row) is not None
 
 
 def eligible_variants(rows):
