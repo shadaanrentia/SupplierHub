@@ -6,7 +6,7 @@ import json
 import math
 import deps
 from size_order import size_key, sort_variants
-from sku_eligibility import eligible_variants
+from sku_eligibility import eligible_variants, new_export_eligible_variants
 from deps import row_to_dict, calculate_sale_price
 
 MAX_VARIANTS_PER_FAMILY = 199
@@ -295,7 +295,11 @@ async def export_product(ls, product, variants, images, markup, category_id):
         dict(v) for v in variants
         if v.get("is_active") is not False
     ]
-    eligible = eligible_variants(active)
+    eligible = (
+        eligible_variants(active)
+        if product.get("lightspeed_product_id")
+        else new_export_eligible_variants(active)
+    )
 
     async with deps.pool.acquire() as conn:
         groups = [
@@ -312,7 +316,10 @@ async def export_product(ls, product, variants, images, markup, category_id):
 
     if groups:
         by_id = {str(v["id"]): v for v in active}
-        eligible_ids = {str(v["id"]) for v in eligible}
+        new_eligible_ids = {
+            str(v["id"])
+            for v in new_export_eligible_variants(active)
+        }
 
         saved_ids = [
             str(variant_id)
@@ -340,7 +347,7 @@ async def export_product(ls, product, variants, images, markup, category_id):
             }
 
             if not group.get("lightspeed_product_id"):
-                if not group_ids.issubset(eligible_ids):
+                if not group_ids.issubset(new_eligible_ids):
                     raise ValueError(
                         "Uncreated export group contains ineligible "
                         "variants; review the split plan"
