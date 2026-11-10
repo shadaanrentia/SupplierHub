@@ -3,7 +3,7 @@ import axios from "../lib/axios";
 import SearchField from "../components/SearchField";
 import { ProductLink } from "../components/ProductDetails";
 
-const API = (process.env.REACT_APP_BACKEND_URL || "").replace(/\\/+$/, "") + "/api";
+const API = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/+$/, "") + "/api";
 
 export default function LightspeedCleanupReview() {
   const [search,setSearch] = useState("");
