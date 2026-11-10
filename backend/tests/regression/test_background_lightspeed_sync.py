@@ -173,7 +173,7 @@ class ReadinessTests(unittest.TestCase):
                 'new_export_eligible_variants': lambda x: x,
                 'skip_sku': lambda x: False,
                 'validate_prices': lambda *args: None,
-                'LIMIT': 200,
+                'LIMIT': 199,
                 'math': __import__('math'),
             },
         )
