@@ -49,12 +49,11 @@ export default function ProductPreprocessing() {
   const [readyLoading, setReadyLoading] = useState(true);
   const [readyError, setReadyError] = useState('');
   const [statusFilter, setStatusFilter] = useState("all");
-  const [oversizedOnly, setOversizedOnly] = useState(false);
   const [search, setSearch] = useState(()=>new URLSearchParams(window.location.search).get("search") || "");
   const [searchQuery, setSearchQuery] = useState(()=>new URLSearchParams(window.location.search).get("search") || "");
   const requestVersion = useRef(0);
   const summaryVersion = useRef(0);
-  useEffect(() => {setSelectedProducts(new Set());},[searchQuery,statusFilter,supplierId,categoryId,oversizedOnly]);
+  useEffect(() => {setSelectedProducts(new Set());},[searchQuery,statusFilter,supplierId,categoryId]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const syncPlatform = "lightspeed";
@@ -73,7 +72,6 @@ export default function ProductPreprocessing() {
       if (statusFilter !== "all") {
         params.append("status", statusFilter);
       }
-      if (oversizedOnly) params.append("oversized", "true");
       const res = await axios.get(`${API}/preprocessing/products?${params}`);
       if(version!==requestVersion.current) return;
       setProducts(res.data.products || []);
@@ -88,7 +86,7 @@ export default function ProductPreprocessing() {
     } finally {
       if(version===requestVersion.current) {setLoading(false);setReadyLoading(false);}
     }
-  }, [page, statusFilter, searchQuery,supplierId,categoryId,oversizedOnly]);
+  }, [page, statusFilter, searchQuery,supplierId,categoryId]);
 
   const readySelectedCount=readyIds.filter(id=>selectedProducts.has(id)).length;
   const allReadySelected=readyIds.length>0 && readySelectedCount===readyIds.length;
@@ -311,10 +309,8 @@ export default function ProductPreprocessing() {
                   <SelectItem value="synced">Synced</SelectItem>
                 </SelectContent>
               </Select>
-              <select aria-label="Variant count filter" disabled={syncing} value={oversizedOnly ? "200plus" : "all"} onChange={e=>{setOversizedOnly(e.target.value==="200plus");setPage(1);setSelectedProducts(new Set());}} className="rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm"><option value="all">All variant counts</option><option value="200plus">200+ eligible variants</option></select>
               <select aria-label="Lightspeed category" disabled={syncing} value={categoryId} onChange={e=>{setCategoryId(e.target.value);setPage(1);setSelectedProducts(new Set());}} className="max-w-full rounded border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm"><option value="all">All Lightspeed categories</option>{categories.map(category=><option key={category.category_id} value={category.category_id}>{category.category_name} ({category.product_count})</option>)}</select>
               {categoryError&&<p role="alert" className="text-xs text-red-300">{categoryError}</p>}
-              {categories.some(c=>!c.category_available)&&<p className="category-remap-note">Some products need a current category. <a className="text-blue-400" href={`/category-mapping?supplier_id=${encodeURIComponent(supplierId)}`}>Review mappings</a></p>}
               <SearchField aria-label="Search preprocessing products" placeholder="Search product name or SKU" value={search} disabled={syncing} onChange={event=>{setSearch(event.target.value);setSearchQuery(event.target.value);setPage(1);}} className="pp-search bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm" />
               <Button disabled={loading || syncing || readyLoading || !!readyError || !readyIds.length} aria-label="Select eligible products matching these filters" variant="outline" size="sm" onClick={selectAllVisible}>
                 {statusFilter==='synced'?'Select synced':'Select all eligible'}
