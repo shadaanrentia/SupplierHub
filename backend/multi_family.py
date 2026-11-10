@@ -86,7 +86,12 @@ async def export_families(ls, product, variants, images, markup, category_id):
             # metadata or product writes. Existing destinations retain zero stock.
             variants_by_id = {str(v['id']): v for v in variants}
             for planned_group in groups:
-                if planned_group.get('lightspeed_product_id'):
+                if (
+                    planned_group.get('lightspeed_product_id')
+                    or planned_group.get('state') in ('uncertain', 'creating', 'done', 'images_pending')
+                ):
+                    # Resolve prior creation outcomes before applying new-product
+                    # eligibility. Never turn an uncertain create into a blind retry.
                     continue
                 planned_ids = [str(i) for i in decode(planned_group['variant_ids'])]
                 planned_variants = [variants_by_id[i] for i in planned_ids]
