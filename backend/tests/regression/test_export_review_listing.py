@@ -21,7 +21,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
             batches.append([p['id'] for p in batch])
             return {p['id']:{'excluded_from_queue':int(p['id'])%11==0,'variants_count':201 if int(p['id'])%2 else 10,'is_valid':int(p['id'])%3==0,'previous_export_failed':False,'status':'ready','images_count':2} for p in batch}
         def validate_export_name(name,sku):return name+' '+sku
-        ns={'deps':SimpleNamespace(pool=SimpleNamespace(acquire=acquire)),'row_to_dict':dict,'load_readiness':readiness,'public_state':dict,'export_name':validate_export_name,'LIMIT':200}
+        ns={'deps':SimpleNamespace(pool=SimpleNamespace(acquire=acquire)),'row_to_dict':dict,'load_readiness':readiness,'public_state':dict,'export_name':validate_export_name,'LIMIT':199}
         tree=ast.parse((ROOT/'backend/routes/export_review.py').read_text())
         fn=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='_review_listing')
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'review-listing','exec'),ns)
@@ -94,7 +94,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
             "load_readiness": readiness,
             "public_state": dict,
             "export_name": lambda name, sku: name + " " + sku,
-            "LIMIT": 200,
+            "LIMIT": 199,
         }
 
         tree = ast.parse(
