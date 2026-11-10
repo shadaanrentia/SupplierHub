@@ -186,7 +186,10 @@ async def cleanup_preview(search: str='', supplier_id: str=None, page: int=Query
         for destination_id in sorted(destinations):
             try:
                 family=await asyncio.to_thread(ls.remote_family,destination_id)
-                remote_members=members(family)
+                source_skus={str(v.get('variant_sku') or '').strip().casefold() for v in variants if v.get('variant_sku')}
+                remote_members=members(family,expected_skus=source_skus)
+                if not remote_members or not set(remote_members).issubset(source_skus):
+                    raise ValueError('Remote family contains SKUs that do not belong to this SupplierHub product; candidate matching was withheld')
                 for sku,reason in reasons.items():
                     item=remote_members.get(sku)
                     if item:
