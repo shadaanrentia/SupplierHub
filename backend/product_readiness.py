@@ -23,7 +23,7 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
     errors = []
     if any(v.get('inventory_error') for v in active):
         errors.append('Selected warehouse inventory is missing or invalid; refresh supplier inventory before syncing')
-    if excluded: errors.append('All active variant SKUs are temporarily excluded: missing price and zero inventory')
+    if excluded: errors.append('All active variants are currently ineligible: each needs a valid positive price and positive inventory')
     if not str(product.get('product_name') or '').strip(): errors.append('Product name is missing')
     if not str(product.get('supplier_sku') or '').strip(): errors.append('Supplier SKU is missing')
     try: validate_prices(product, variants)
