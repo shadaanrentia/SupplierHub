@@ -131,7 +131,7 @@ async def get_preprocessing_products(page: int=Query(1,ge=1), limit: int=Query(5
 
 
 @router.get('/preprocessing/ready-ids')
-async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id: str=None, include_synced: bool=False, category_id: str=None, user: dict=Depends(get_current_user)):
+async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id: str=None, include_synced: bool=False, category_id: str=None, oversized: bool=False, user: dict=Depends(get_current_user)):
     await ensure_pricing_schema()
     if status not in (None,'all','ready','invalid','synced','images_pending'): raise HTTPException(400,'Unknown status filter')
     async with deps.pool.acquire() as conn:
@@ -144,6 +144,7 @@ async def preprocessing_ready_ids(search: str='', status: str=None, supplier_id:
     for product in products:
         state=states[product['id']]
         if not in_category(state,category_id) or state['excluded_from_queue'] or (status not in (None,'all') and state['status']!=status): continue
+        if oversized and state['variants_count'] < 200: continue
         product=apply_category_policy(product,state['mapped_lightspeed_category_id'],policies)
         try: pricing_summary(product,state['variants'],markup)
         except ValueError: continue
