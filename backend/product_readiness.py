@@ -129,7 +129,7 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
             if not available: errors.append('An export batch is running; wait or restart the backend after stopping the worker')
         except (TypeError, ValueError, KeyError): errors.append('Saved split plan is invalid; inspect Export Review')
     elif len(variants) > LIMIT:
-        errors.append('More than 200 variants: preview and save size families in Export Review')
+        errors.append(f'More than {LIMIT} variants: preview and save size families in Export Review')
     # Remote image retries stay in Pre-processing; absent source images still block readiness.
     valid = not errors
     pending = bool(image_issues) or not images or product.get('lightspeed_sync_status') in ('images_pending','needs_review')
