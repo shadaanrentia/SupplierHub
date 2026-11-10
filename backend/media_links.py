@@ -8,7 +8,7 @@ def usable(value):
 
 
 def colour_key(value):
-    return re.sub(r'\s+', ' ', re.sub(r'^[\s~]+', '', str(value or ''))).strip().casefold()
+    return re.sub(r'\s+', ' ', re.sub(r"^[\\s~'’‘`]+", '', str(value or ''))).strip().casefold()
 
 
 def xml_links(element):
