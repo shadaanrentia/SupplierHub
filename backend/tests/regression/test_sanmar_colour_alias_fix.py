@@ -32,10 +32,10 @@ class AliasTests(unittest.TestCase):
  def test_authoritative_part_links_unchanged(self):
   image={'url':BASE+'atc8001l_heatherforest.jpg','source_part_ids':['explicit']}
   self.assertEqual(associate_sanmar_images([image],[{'variant_sku':'a','color':'Hthr Forest'}],'ATC8001L')[0]['source_part_ids'],['explicit'])
-  def test_leading_tilde_removed(self):
-    self.assertEqual(sanmar_colour_alias('~Navy'), 'navy')
-    self.assertEqual(sanmar_colour_alias(' ~~Navy'), 'navy')
-    self.assertEqual(sanmar_colour_alias('Navy~White'), 'navy~white')
+ def test_leading_tilde_removed(self):
+  self.assertEqual(sanmar_colour_alias('~Navy'), 'navy')
+  self.assertEqual(sanmar_colour_alias(' ~~Navy'), 'navy')
+  self.assertEqual(sanmar_colour_alias('Navy~White'), 'navy~white')
  def test_ambiguous_colour_combination_rejected(self):
   rows=[{'variant_sku':'a','color':'Hthr Forest'},{'variant_sku':'b','color':'Hthr Navy'}]
   self.assertNotIn('source_part_ids',associate_sanmar_images([{'url':BASE+'atc8001l_heatherforest_heathernavy.jpg'}],rows,'ATC8001L')[0])
