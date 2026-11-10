@@ -7,7 +7,7 @@ UNBRANDED='__unbranded__'
 UNASSIGNED='__unassigned__'
 IMAGE_EXISTS="EXISTS (SELECT 1 FROM product_media pm WHERE pm.product_id=p.id AND pm.media_type='image' AND (COALESCE(pm.url,'')<>'' OR COALESCE(pm.image_base64,'')<>''))"
 VARIANT_COUNT='(SELECT COUNT(*) FROM product_variants v WHERE v.product_id=p.id)'
-COLOUR="LOWER(BTRIM(REGEXP_REPLACE(COALESCE(v.color,''),'^[~[:space:]]+','','g')))"
+COLOUR="LOWER(BTRIM(REPLACE(REPLACE(RTRIM(LTRIM(COALESCE(v.color,''), chr(39)||'’‘`~ '),'.'),' / ','/'),' /','/')))"
 SAVED_INVENTORY='(SELECT CASE WHEN COUNT(*)=0 OR COUNT(*) FILTER(WHERE v.inventory IS NULL OR v.inventory<0)>0 THEN NULL ELSE SUM(v.inventory) END FROM product_variants v WHERE v.product_id=p.id)'
 BRAND_SORT="CASE WHEN LOWER(BTRIM(p.brand))='unbranded' THEN NULL ELSE LOWER(NULLIF(BTRIM(p.brand),'')) END"
 SORTS={'newest':'p.created_at DESC, p.id','oldest':'p.created_at ASC, p.id',
