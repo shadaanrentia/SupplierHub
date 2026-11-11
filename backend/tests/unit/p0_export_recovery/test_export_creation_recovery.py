@@ -145,6 +145,7 @@ def environment(monkeypatch):
     images = [{
         "media_type": "image",
         "url": "https://example.invalid/image.jpg",
+        "source_part_ids": ["TEST-S","TEST-M"],
     }]
 
     conn.groups = [{

@@ -93,6 +93,7 @@ def export_environment(monkeypatch):
     images = [{
         "media_type": "image",
         "url": "https://example.invalid/test.jpg",
+        "source_part_ids": ["ATC1000-BLK-S","ATC1000-BLK-M"],
     }]
 
     return ls, conn, repair, product, variants, images

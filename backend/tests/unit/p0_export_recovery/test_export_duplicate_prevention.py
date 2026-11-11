@@ -95,6 +95,7 @@ def environment(monkeypatch):
     images = [{
         "media_type": "image",
         "url": "https://example.invalid/product.jpg",
+        "source_part_ids": ["TEST-001-S","TEST-001-M"],
     }]
 
     connection = FakeConnection([])

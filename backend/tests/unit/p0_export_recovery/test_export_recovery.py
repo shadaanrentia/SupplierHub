@@ -99,6 +99,7 @@ def split_environment(monkeypatch):
     images = [{
         "media_type": "image",
         "url": "https://example.invalid/product.jpg",
+        "source_part_ids": ["SKU-1","SKU-2"],
     }]
 
     return ls, conn, product, variants, images, repair

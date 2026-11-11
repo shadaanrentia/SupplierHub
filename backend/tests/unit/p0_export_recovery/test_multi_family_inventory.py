@@ -134,6 +134,7 @@ def existing_family_environment(monkeypatch):
     images = [{
         "media_type": "image",
         "url": "https://example.invalid/test.jpg",
+        "source_part_ids": ["SKU-S","SKU-M"],
     }]
 
     return ls, conn, product, variants, images, repair

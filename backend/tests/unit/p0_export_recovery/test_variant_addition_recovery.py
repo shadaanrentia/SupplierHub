@@ -177,6 +177,7 @@ def env(monkeypatch):
     images = [{
         "media_type": "image",
         "url": "https://example.invalid/image.jpg",
+        "source_part_ids": ["TEST-S","TEST-M"],
     }]
 
     conn.groups = [{
@@ -296,6 +297,11 @@ async def test_oversized_group_rejected_before_creation(env):
         }
         for i in range(201)
     ]
+    env.images = [{
+        "media_type": "image",
+        "url": f"https://example.invalid/variant-{i}.jpg",
+        "source_part_ids": [f"TEST-{i}"],
+    } for i in range(201)]
 
     env.conn.groups[0]["variant_ids"] = [
         v["id"] for v in env.variants
