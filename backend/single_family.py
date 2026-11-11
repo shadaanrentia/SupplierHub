@@ -125,10 +125,6 @@ async def export_one_family(ls, product, variants, images, markup, category_id):
                 raise ValueError('Save batches covering every eligible variant exactly once before syncing')
             if any(g['state'] == 'running' for g in groups):
                 raise ValueError('An older export is running; stop that worker before resuming')
-            from media_links import prepare_variant_images
-            images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
-            if missing_image_skus:
-                raise ValueError('Verified individual images are required before export; missing: ' + ', '.join(missing_image_skus[:20]))
             await conn.execute('INSERT INTO lightspeed_family_exports(product_id,store_domain) VALUES($1,$2) ON CONFLICT DO NOTHING', key, domain)
             saved = dict(await conn.fetchrow('SELECT * FROM lightspeed_family_exports WHERE product_id=$1 AND store_domain=$2', key, domain))
             destination = saved.get('destination_id') or product.get('lightspeed_product_id')
@@ -165,6 +161,13 @@ async def export_one_family(ls, product, variants, images, markup, category_id):
                 destination = str(next(iter(remote.values()))['id'])
             elif saved['state'] in ('creating', 'create_uncertain') or any(g['state'] == 'uncertain' for g in groups):
                 raise ValueError('Earlier creation outcome is unknown and no family was found; inspect Lightspeed before retrying')
+            # Existing family ownership and uncertain-creation recovery are
+            # read-only checks. Require complete image coverage before any
+            # metadata, product, inventory, or channel mutation.
+            from media_links import prepare_variant_images
+            images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
+            if missing_image_skus:
+                raise ValueError('Verified individual images are required before export; missing: ' + ', '.join(missing_image_skus[:20]))
             await conn.execute("UPDATE lightspeed_export_groups SET state='running',message='Exporting batches into one family',updated_at=NOW() WHERE product_id=$1 AND store_domain=$2 AND state!='done'", key, domain)
             supplier_id = await asyncio.to_thread(ls._get_or_create_supplier, product.get('supplier_name')) if product.get('supplier_name') else None
             brand_id = await asyncio.to_thread(ls._get_or_create_brand, product.get('brand')) if product.get('brand') else None
