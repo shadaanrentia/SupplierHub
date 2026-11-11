@@ -31,11 +31,12 @@ class VariantImageExportGateTests(unittest.TestCase):
                  "source_part_ids": ["OTHER-SKU"], "source_color": "True Navy"}
         self.assertFalse(image_matches_variant(image, self.variants[0]))
 
-    def test_missing_variant_image_blocks_readiness(self):
+    def test_missing_variant_image_blocks_sync_but_not_product_readiness(self):
         images = [{"url": "https://media.sanmarcanada.com/catalog/product/t/s/ts445_true_navy_front.jpg", "media_type": "image"}]
         state = evaluate(self.product, self.variants, images, [], "category-1")
-        self.assertFalse(state["is_valid"])
-        self.assertTrue(any("Verified individual images" in e for e in state["validation_errors"]))
+        self.assertTrue(state["is_valid"], state["validation_errors"])
+        self.assertFalse(state["can_sync"])
+        self.assertTrue(any("Missing verified variant images" in warning for warning in state["image_warnings"]))
 
     def test_all_variant_images_allow_readiness(self):
         images = [

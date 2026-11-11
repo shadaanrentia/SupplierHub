@@ -224,12 +224,12 @@ async def _legacy_export_product(
             raise ValueError('Variants changed after the saved split plan; review the plan before syncing')
         if any(g['state'] in ('running','uncertain') for g in groups):
             raise ValueError('An export is running or has an uncertain result; inspect Export Review')
+    else:
+        groups = [None]
     from media_links import prepare_variant_images
     images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
     if missing_image_skus:
         raise ValueError('Verified individual images are required before export; missing: ' + ', '.join(missing_image_skus[:20]))
-    else:
-        groups = [None]
     # Before the first split write, verify every original SKU is unassigned remotely.
     # Do not repeat this check for confirmed groups, whose variants now exist remotely.
     if groups[0] and not any(g.get('lightspeed_product_id') for g in groups):
