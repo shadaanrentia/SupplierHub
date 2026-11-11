@@ -102,7 +102,6 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
     if not images:
         image_warnings.append('No usable source images; refresh supplier media')
     if missing_image_skus:
-        errors.append('Verified individual images are missing for variants: ' + ', '.join(missing_image_skus[:20]))
         image_warnings.append('Missing verified variant images: ' + ', '.join(missing_image_skus[:20]))
     for variant in variants:
         try:
@@ -141,7 +140,7 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
     valid = not errors
     pending = bool(image_issues) or not images or product.get('lightspeed_sync_status') in ('images_pending','needs_review')
     synced = valid and product.get('lightspeed_sync_status') == 'synced'
-    return { 'variants': variants,'excluded_from_queue': excluded, 'skipped_variants_count': skipped, 'validation_errors': errors, 'is_valid': valid, 'can_sync': valid and (not synced or pending),
+    return { 'variants': variants,'excluded_from_queue': excluded, 'skipped_variants_count': skipped, 'validation_errors': errors, 'is_valid': valid, 'can_sync': valid and not missing_image_skus and (not synced or pending),
             'status': 'invalid' if errors else ('images_pending' if pending else ('synced' if synced else 'ready')),
             'mapped_lightspeed_category_id': category_id, 'variants_count': len(variants),
             'image_warnings': image_warnings, 'images_count': len(images), 'group_count': len(groups), 'plan_ready': plan_ready,
