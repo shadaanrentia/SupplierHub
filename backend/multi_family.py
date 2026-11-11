@@ -86,6 +86,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
             # creations, remote membership and addition journals before image
             # validation. This phase must never POST or mutate Lightspeed.
             variants_by_id = {str(v['id']): v for v in variants}
+            preflight_destinations = {}
             for planned_group in groups:
                 planned_ids = [str(i) for i in decode(planned_group['variant_ids'])]
                 planned_batch = sort_variants([dict(variants_by_id[i]) for i in planned_ids])
@@ -149,6 +150,11 @@ async def export_families(ls, product, variants, images, markup, category_id):
                         )
                         if journal:
                             raise ValueError('Previous variant addition is not visible; no duplicate POST sent')
+                preflight_destinations[str(planned_group['id'])] = {
+                    'family': planned_family,
+                    'found': found,
+                    'deleted': deleted,
+                }
 
             from media_links import prepare_variant_images
             images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
@@ -192,22 +198,10 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 destination = group.get('lightspeed_product_id')
                 # A stored, live destination is reconciled by member IDs and exact SKUs,
                 # not a global search that can return unrelated duplicates.
-                family = None
-                found = {}
-                deleted = destination and await asyncio.to_thread(ls.remote_product_deleted, destination)
-                if destination and not deleted:
-                    family = await asyncio.to_thread(ls.remote_family, str(destination))
-                    owned = members(family, expected_skus=[sku(v) for v in batch])
-                    if str(destination) not in {str(v['id']) for v in owned.values()}:
-                        raise ValueError('Saved destination is not a member of its returned family')
-                    if not set(owned).issubset({sku(v) for v in batch}):
-                        raise ValueError('Saved destination contains SKUs outside this reviewed group')
-                    # Only missing members need conflict checks before an addition.
-                    missing_skus = [v['variant_sku'] for v in batch if sku(v) not in owned]
-                    if missing_skus:
-                        found = await asyncio.to_thread(ls.lookup_skus, missing_skus)
-                else:
-                    found = await asyncio.to_thread(ls.lookup_skus, [v['variant_sku'] for v in batch] + [group['export_sku']])
+                preflight = preflight_destinations[str(group['id'])]
+                family = preflight['family']
+                found = preflight['found']
+                deleted = preflight['deleted']
                 if deleted:
                     if found: raise ValueError('Deleted destination has SKUs still live elsewhere; migration review required')
                     found = await asyncio.to_thread(ls.lookup_skus, [v['variant_sku'] for v in batch] + [group['export_sku']])
