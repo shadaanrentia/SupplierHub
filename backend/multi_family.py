@@ -51,6 +51,10 @@ async def export_families(ls, product, variants, images, markup, category_id):
     assert_service_compatible(ls)
     from export_safety import decode, validate_prices, LIMIT
     from sku_eligibility import eligibility_reason
+    from media_links import prepare_variant_images
+    images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
+    if missing_image_skus:
+        raise ValueError('Verified individual images are required before export; missing: ' + ', '.join(missing_image_skus[:20]))
     validate_prices(product, variants)
     if not defer_images.get() and not any(i.get('media_type','image') == 'image' and (i.get('url') or i.get('image_base64')) for i in images):
         raise ValueError('No usable source images; refresh supplier media')

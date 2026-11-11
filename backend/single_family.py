@@ -106,6 +106,10 @@ async def export_one_family(ls, product, variants, images, markup, category_id):
         raise ValueError(f'Lightspeed permits at most 200 variants per family; this product has {len(variants)} eligible variants. Select at most 200 or use separate families. Batching does not bypass this limit.')
     from media_links import normalize_colour_label
     variants = [dict(v, color=normalize_colour_label(v.get('color'))) for v in variants]
+    from media_links import prepare_variant_images
+    images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
+    if missing_image_skus:
+        raise ValueError('Verified individual images are required before export; missing: ' + ', '.join(missing_image_skus[:20]))
     validate_prices(product, variants)
     if not variants or len({sku(v) for v in variants}) != len(variants) or any(not sku(v) for v in variants):
         raise ValueError('Missing/duplicate variant SKUs')

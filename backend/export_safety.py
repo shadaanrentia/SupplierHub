@@ -204,6 +204,10 @@ async def _legacy_export_product(
     from media_links import normalize_colour_label
     for variant in variants:
         variant['color'] = normalize_colour_label(variant.get('color'))
+    from media_links import prepare_variant_images
+    images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
+    if missing_image_skus:
+        raise ValueError('Verified individual images are required before export; missing: ' + ', '.join(missing_image_skus[:20]))
     validate_prices(product, variants)
     from pricing_rules import prepare_export_pricing
     async with deps.pool.acquire() as pricing_conn:

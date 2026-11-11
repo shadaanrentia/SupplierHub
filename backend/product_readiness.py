@@ -96,7 +96,14 @@ def evaluate(product, variants, images, groups, category_id, category_error=None
     try: validate_prices(product, variants)
     except ValueError as exc: errors.append(str(exc))
     if not category_id: errors.append(category_error or 'Choose and publish a Lightspeed category in Category Mapping')
-    image_warnings = [] if images else ['No usable source images; refresh supplier media']
+    from media_links import prepare_variant_images
+    images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
+    image_warnings = []
+    if not images:
+        image_warnings.append('No usable source images; refresh supplier media')
+    if missing_image_skus:
+        errors.append('Verified individual images are missing for variants: ' + ', '.join(missing_image_skus[:20]))
+        image_warnings.append('Missing verified variant images: ' + ', '.join(missing_image_skus[:20]))
     for variant in variants:
         try:
             stock = float(variant.get('inventory'))

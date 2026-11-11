@@ -160,6 +160,41 @@ def associate_sanmar_images(images, variants, product_sku):
 
 
 
+
+def image_matches_variant(image, variant):
+    """Return true only for an exact supplier part or exact colour association."""
+    parts = image.get('source_part_ids') or image.get('part_ids') or []
+    if isinstance(parts, str):
+        try:
+            parsed = json.loads(parts)
+            parts = parsed if isinstance(parsed, list) else [parts]
+        except (ValueError, TypeError):
+            parts = [parts]
+    parts = [str(value).strip().casefold() for value in parts if usable(value)]
+    variant_sku = str(variant.get('variant_sku') or '').strip().casefold()
+    if parts:
+        return bool(variant_sku and variant_sku in parts)
+    colour = image.get('source_color') or image.get('color') or image.get('part_color')
+    return bool(usable(colour) and colour_key(colour)
+                and colour_key(colour) == colour_key(variant.get('color')))
+
+
+def prepare_variant_images(images, variants, product_sku):
+    """Apply conservative SanMar recovery and report variants without a verified image."""
+    associated = associate_sanmar_images(images, variants, product_sku)
+    usable_images = [
+        image for image in associated
+        if image.get('media_type', 'image') == 'image'
+        and (str(image.get('url') or '').strip() or image.get('image_base64'))
+    ]
+    missing = [
+        str(variant.get('variant_sku') or variant.get('id') or 'unknown')
+        for variant in variants
+        if not any(image_matches_variant(image, variant) for image in usable_images)
+    ]
+    return associated, missing
+
+
 def matcher_runtime():
     """Identify the matcher loaded by this worker without exposing server paths."""
     import hashlib
