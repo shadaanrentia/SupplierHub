@@ -82,6 +82,74 @@ async def export_families(ls, product, variants, images, markup, category_id):
             if any(g['state'] == 'running' for g in groups):
                 raise ValueError('Another worker is running; stop it before resuming')
 
+            # Read-only recovery preflight. Resolve saved destinations, uncertain
+            # creations, remote membership and addition journals before image
+            # validation. This phase must never POST or mutate Lightspeed.
+            variants_by_id = {str(v['id']): v for v in variants}
+            for planned_group in groups:
+                planned_ids = [str(i) for i in decode(planned_group['variant_ids'])]
+                planned_batch = sort_variants([dict(variants_by_id[i]) for i in planned_ids])
+                if not 0 < len(planned_batch) <= LIMIT:
+                    raise ValueError(f'Each family must contain 1–{LIMIT} eligible variants')
+                planned_skus = [sku(v) for v in planned_batch]
+                saved_destination = planned_group.get('lightspeed_product_id')
+                planned_family = None
+                found = {}
+                deleted = bool(saved_destination and await asyncio.to_thread(ls.remote_product_deleted, saved_destination))
+                if saved_destination and not deleted:
+                    planned_family = await asyncio.to_thread(ls.remote_family, str(saved_destination))
+                    owned = members(planned_family, expected_skus=planned_skus)
+                    if str(saved_destination) not in {str(v['id']) for v in owned.values()}:
+                        raise ValueError('Saved destination is not a member of its returned family')
+                    if not set(owned).issubset(set(planned_skus)):
+                        raise ValueError('Saved destination contains SKUs outside this reviewed group')
+                    missing_skus = [value for value in planned_skus if value not in owned]
+                    if missing_skus:
+                        found = await asyncio.to_thread(ls.lookup_skus, missing_skus)
+                else:
+                    found = await asyncio.to_thread(
+                        ls.lookup_skus,
+                        [v['variant_sku'] for v in planned_batch] + [planned_group['export_sku']]
+                    )
+                if deleted:
+                    if found:
+                        raise ValueError('Deleted destination has SKUs still live elsewhere; migration review required')
+                    repeated = await asyncio.to_thread(
+                        ls.lookup_skus,
+                        [v['variant_sku'] for v in planned_batch] + [planned_group['export_sku']]
+                    )
+                    if repeated:
+                        raise ValueError('Destination changed during deletion verification')
+                    from sku_eligibility import eligibility_reason
+                    blocked = [(v.get('variant_sku') or v.get('id'), eligibility_reason(v))
+                               for v in planned_batch if eligibility_reason(v)]
+                    if blocked:
+                        details = ', '.join(f'{variant_sku}: {reason}' for variant_sku, reason in blocked[:10])
+                        raise ValueError('Cannot recreate a Lightspeed family with ineligible variants: ' + details)
+                    found = {}
+                if saved_destination or found:
+                    candidate = str(saved_destination or next(iter(found.values()))['id'])
+                    planned_family = planned_family or await asyncio.to_thread(ls.remote_family, candidate)
+                    verify_group_destination(
+                        planned_family, planned_skus, found, saved_destination,
+                        family_name(product, planned_group, planned_batch),
+                        planned_group['group_number']
+                    )
+                elif planned_group['state'] in ('uncertain', 'creating', 'done', 'images_pending'):
+                    raise ValueError('Previous creation outcome cannot be verified; no duplicate creation sent')
+                if planned_family:
+                    remote = members(planned_family)
+                    missing = [v for v in planned_batch if sku(v) not in remote]
+                    if len(remote) + len(missing) > LIMIT:
+                        raise ValueError(f'Family would exceed the maximum of {LIMIT} variants')
+                    for variant in missing:
+                        journal = await conn.fetchrow(
+                            'SELECT state FROM lightspeed_family_additions WHERE product_id=$1 AND store_domain=$2 AND variant_sku=$3',
+                            key, domain, sku(variant)
+                        )
+                        if journal:
+                            raise ValueError('Previous variant addition is not visible; no duplicate POST sent')
+
             from media_links import prepare_variant_images
             images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
             if missing_image_skus:
