@@ -247,6 +247,9 @@ class AthleticKnitClient:
         product_id: str
     ) -> str:
 
+        if not self.inventory_url:
+            raise ValueError("Enter the Athletic Knit Inventory service URL")
+
         body = f"""
     <inv:GetInventoryLevelsRequest
         xmlns:inv="{INVENTORY_NS}"
@@ -305,6 +308,9 @@ class AthleticKnitClient:
         self,
         product_id: str
     ) -> str:
+
+        if not self.media_url:
+            raise ValueError("Enter the Athletic Knit Media service URL")
 
         body = f"""
     <ns:GetMediaContentRequest
