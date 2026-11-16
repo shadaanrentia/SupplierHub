@@ -80,6 +80,7 @@ function LegacyCategoryMapping() {
   const [mappingPage, setMappingPage] = useState(1);
   const [platformPage, setPlatformPage] = useState(1);
   const [expandedCategories,setExpandedCategories]=useState(new Set());
+  const [expandedSupplierCategories,setExpandedSupplierCategories]=useState(new Set());
   const [treeSearch,setTreeSearch]=useState('');
   const [categoryStatus, setCategoryStatus] = useState({});
   const alive = useRef(false);
@@ -96,12 +97,45 @@ function LegacyCategoryMapping() {
     setCategoryStatus(prev => prev.synced_at === data.synced_at && prev.last_error === data.last_error
       ? prev : {synced_at: data.synced_at, last_error: data.last_error});
   }, []);
-  const filteredCategories = useMemo(() => supplierCategories.filter(category =>
-    String(category).toLowerCase().includes(categorySearch.trim().toLowerCase())
-  ), [supplierCategories, categorySearch]);
-  const mappingPages = Math.max(1, Math.ceil(filteredCategories.length / PAGE_SIZE));
+  // Supplier category paths use "Parent > Subcategory". Group paths for
+  // display while keeping the complete path as the mapping key.
+  const supplierCategoryGroups = useMemo(() => {
+    const groups = new Map();
+    supplierCategories.forEach(value => {
+      const parts = String(value).split(">").map(part => part.trim()).filter(Boolean);
+      if (!parts.length) return;
+      const parent = parts[0];
+      if (!groups.has(parent)) groups.set(parent, {parent, children: [], parentValue: null});
+      const group = groups.get(parent);
+      if (parts.length === 1) group.parentValue = value;
+      else group.children.push(value);
+    });
+    return [...groups.values()].map(group => ({
+      ...group,
+      children: [...new Set(group.children)].sort((a,b)=>a.localeCompare(b))
+    })).sort((a,b)=>a.parent.localeCompare(b.parent));
+  }, [supplierCategories]);
+  const filteredSupplierGroups = useMemo(() => {
+    const query = categorySearch.trim().toLowerCase();
+    if (!query) return supplierCategoryGroups;
+    return supplierCategoryGroups.map(group => ({
+      ...group,
+      children: group.children.filter(value => value.toLowerCase().includes(query))
+    })).filter(group => group.parent.toLowerCase().includes(query) || group.children.length);
+  }, [supplierCategoryGroups, categorySearch]);
+  const mappingPages = Math.max(1, Math.ceil(filteredSupplierGroups.length / PAGE_SIZE));
   const safePage = Math.min(mappingPage, mappingPages);
-  const visibleSupplierCategories = filteredCategories.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const visibleSupplierGroups = filteredSupplierGroups.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const visibleSupplierRows = visibleSupplierGroups.flatMap(group => {
+    if (!group.children.length) {
+      const value = group.parentValue || group.parent;
+      return [{type:"category", value}];
+    }
+    const expanded = expandedSupplierCategories.has(group.parent) || Boolean(categorySearch.trim());
+    const rows = [{type:"parent", value:group.parent, count:group.children.length}];
+    if (expanded) rows.push(...group.children.map(value => ({type:"category", value})));
+    return rows;
+  });
   useEffect(() => { setMappingPage(1); }, [categorySearch, platform, supplierId]);
   useEffect(() => { setPlatformPage(1); }, [platform]);
 
@@ -560,7 +594,7 @@ function LegacyCategoryMapping() {
 
           </div>
           {supplierLoading ? <p role="status" className="py-8 text-zinc-400">Loading supplier categories…</p> : supplierError ?
-            <p role="alert" className="py-8 text-red-400">{supplierError}</p> : filteredCategories.length > 0 ? (
+            <p role="alert" className="py-8 text-red-400">{supplierError}</p> : filteredSupplierGroups.length > 0 ? (
             <div className="overflow-visible">
               <table className="w-full text-sm">
                 <thead>
@@ -571,13 +605,30 @@ function LegacyCategoryMapping() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleSupplierCategories.map((supplierCat) => {
+                  {visibleSupplierRows.map((row) => {
+                    if (row.type === "parent") {
+                      const expanded = expandedSupplierCategories.has(row.value) || Boolean(categorySearch.trim());
+                      return <tr key={`supplier-parent-${row.value}`} className="border-b border-zinc-800 bg-zinc-900/70">
+                        <td colSpan={3} className="py-2 px-3">
+                          <button type="button" onClick={() => setExpandedSupplierCategories(current => {
+                            const next = new Set(current);
+                            next.has(row.value) ? next.delete(row.value) : next.add(row.value);
+                            return next;
+                          })} className="flex items-center gap-2 w-full text-left text-zinc-100 font-semibold">
+                            {expanded ? <ChevronDown className="w-4 h-4 text-blue-400" /> : <ChevronRight className="w-4 h-4 text-blue-400" />}
+                            <span>{row.value}</span>
+                            <span className="text-xs text-zinc-500 font-normal">({row.count} subcategories)</span>
+                          </button>
+                        </td>
+                      </tr>;
+                    }
+                    const supplierCat = row.value;
                     const currentMapping = getMappingForSupplier(supplierCat);
                     const isMapped = currentMapping !== "none" && (platform === "odoo" || targetOptions.some(option=>option.value===currentMapping));
                     const suggestion = platform === "lightspeed" ? categorySuggestion(supplierCat,targetOptions) : null;
                     return (
                       <tr key={supplierCat} className="border-b border-zinc-800/50 hover:bg-zinc-800/30" data-testid={`mapping-row-${supplierCat}`}>
-                        <td className="py-2 px-3 text-zinc-100 font-medium">{supplierCat}</td>
+                        <td className="py-2 px-3 pl-10 text-zinc-100 font-medium"><span className="text-zinc-500 mr-2">↳</span>{supplierCat.split(">").slice(1).map(part=>part.trim()).join(" > ") || supplierCat}</td>
                         <td className="py-2 px-3">
                           <SearchableCategoryPicker
                             value={currentMapping} options={targetOptions} disabled={savingMapping[supplierCat] || supplierLoading}
@@ -609,7 +660,7 @@ function LegacyCategoryMapping() {
           )}
           <div className="flex flex-wrap items-center justify-end gap-3 mt-4 pt-4 border-t border-zinc-800">
               <Button variant="outline" size="sm" disabled={safePage <= 1} onClick={() => setMappingPage(safePage - 1)}>Previous</Button>
-              <span className="text-xs text-zinc-400">{safePage} / {mappingPages} · {filteredCategories.length} categories</span>
+              <span className="text-xs text-zinc-400">{safePage} / {mappingPages} · {filteredSupplierGroups.reduce((total,group)=>total+group.children.length+(group.parentValue && !group.children.length ? 1 : 0),0)} categories</span>
               <Button variant="outline" size="sm" disabled={safePage >= mappingPages} onClick={() => setMappingPage(safePage + 1)}>Next</Button>
             </div>
         </CardContent>
