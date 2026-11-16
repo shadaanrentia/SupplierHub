@@ -120,7 +120,9 @@ function LegacyCategoryMapping() {
     if (!query) return supplierCategoryGroups;
     return supplierCategoryGroups.map(group => ({
       ...group,
-      children: group.children.filter(value => value.toLowerCase().includes(query))
+      children: group.parent.toLowerCase().includes(query)
+        ? group.children
+        : group.children.filter(value => value.toLowerCase().includes(query))
     })).filter(group => group.parent.toLowerCase().includes(query) || group.children.length);
   }, [supplierCategoryGroups, categorySearch]);
   const mappingPages = Math.max(1, Math.ceil(filteredSupplierGroups.length / PAGE_SIZE));
@@ -628,7 +630,7 @@ function LegacyCategoryMapping() {
                     const suggestion = platform === "lightspeed" ? categorySuggestion(supplierCat,targetOptions) : null;
                     return (
                       <tr key={supplierCat} className="border-b border-zinc-800/50 hover:bg-zinc-800/30" data-testid={`mapping-row-${supplierCat}`}>
-                        <td className="py-2 px-3 pl-10 text-zinc-100 font-medium"><span className="text-zinc-500 mr-2">↳</span>{supplierCat.split(">").slice(1).map(part=>part.trim()).join(" > ") || supplierCat}</td>
+                        <td className={`py-2 px-3 ${supplierCat.includes(">") ? "pl-10" : ""} text-zinc-100 font-medium`}>{supplierCat.includes(">") && <span className="text-zinc-500 mr-2">↳</span>}{supplierCat.split(">").slice(1).map(part=>part.trim()).join(" > ") || supplierCat}</td>
                         <td className="py-2 px-3">
                           <SearchableCategoryPicker
                             value={currentMapping} options={targetOptions} disabled={savingMapping[supplierCat] || supplierLoading}
