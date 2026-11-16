@@ -154,7 +154,8 @@ class Athletic(Adapter):
                 price=number(tiers[0].get('price'),True) if tiers else None
                 if price is not None:x['price']=price
                 variants.append(x)
-            product=dict(product_name=r['name'],description=r.get('description') or '',brand=r.get('brand') or '',category=r.get('category') or '',variants=variants,_source_metadata=r,_source_product_type='configurable' if variants else 'simple')
+            category_parts=[str(value).strip() for value in (r.get('category'),r.get('subcategory')) if value and str(value).strip()];category_label=' > '.join(dict.fromkeys(category_parts))
+            product=dict(product_name=r['name'],description=r.get('description') or '',brand=r.get('brand') or '',category=category_label,variants=variants,_source_metadata=r,_source_product_type='configurable' if variants else 'simple')
             costs=[v['price'] for v in variants if v.get('price')]
             if costs:product['price']=min(costs)
             return {'product':product}
