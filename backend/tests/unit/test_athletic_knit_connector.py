@@ -131,3 +131,20 @@ def test_product_category_preserves_athletic_knit_subcategory():
 
     assert result["success"] is True
     assert result["product"]["category"] == "Apparel > Hockey Jerseys"
+
+
+def test_product_category_preserves_athletic_knit_subcategory():
+    connector = make_connector()
+    connector.parsed = lambda sku: {
+        "name": "Hockey Jersey",
+        "description": "Team jersey",
+        "brand": "Athletic Knit",
+        "category": "Apparel",
+        "subcategory": "Hockey Jerseys",
+        "variants": [],
+    }
+
+    result = connector.get_product("AK-100")
+
+    assert result["success"] is True
+    assert result["product"]["category"] == "Apparel > Hockey Jerseys"
