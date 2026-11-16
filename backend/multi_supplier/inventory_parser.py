@@ -36,7 +36,7 @@ def get_int(element, xpath, default=0):
         number = float(value)
     except (ValueError, TypeError, OverflowError):
         return default
-    if not number.is_integer():
+    if not number.is_integer() or number < 0:
         return default
     return int(number)
 
