@@ -116,3 +116,13 @@ def new_export_eligible_variants(rows):
         for row in rows
         if eligibility_reason(row) is None
     ]
+
+
+def lightspeed_sync_eligible_variants(rows):
+    """Variants safe to create or update in Lightspeed.
+
+    Supplier imports retain zero stock and invalid-price rows for review.
+    Lightspeed writes require a valid positive cost and positive whole-number
+    inventory. Existing remote variants that fail this check are left untouched.
+    """
+    return new_export_eligible_variants(rows)
