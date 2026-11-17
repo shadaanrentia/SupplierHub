@@ -312,7 +312,6 @@ async def export_product(ls, product, variants, images, markup, category_id):
 
     if groups:
         by_id = {str(v["id"]): v for v in active}
-        sync_eligible_ids = {str(v["id"]) for v in eligible}
 
         saved_ids = [
             str(variant_id)
@@ -331,18 +330,9 @@ async def export_product(ls, product, variants, images, markup, category_id):
                 "review the plan before synchronization"
             )
 
-        # A saved split plan must be reviewed when it contains source rows
-        # that are no longer safe to write. Do not silently reassign group
-        # membership or risk reconciling/deleting an existing remote variant.
-        ineligible_saved = sorted(set(saved_ids) - sync_eligible_ids)
-        if ineligible_saved:
-            raise ValueError(
-                f"{len(ineligible_saved)} variant(s) in the saved split plan "
-                "now have zero/invalid inventory or invalid pricing. "
-                "Keep those supplier records, remove them from the export "
-                "plan in Export Review, then sync again."
-            )
-
+        # Preserve all saved source rows so multi_family can distinguish
+        # existing destinations from new groups. It will write only eligible
+        # rows and leave zero-stock/ineligible existing remote variants alone.
         selected = [by_id[variant_id] for variant_id in saved_ids]
 
         from multi_family import export_families
