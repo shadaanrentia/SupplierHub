@@ -11,14 +11,17 @@ def number(value,positive=False):
     except (ValueError,TypeError):return None
 
 def category_fields(category, subcategory=None):
-    """Normalize supplier category data into parent path and leaf subcategory."""
+    """Normalize a supplier taxonomy into its top-level parent and remaining path."""
     parent=str(category or '').strip()
     child=str(subcategory or '').strip()
     if child:
+        # If the API already supplies a separate child path, preserve it.
         return parent, child
     parts=[part.strip() for part in parent.split('>') if part.strip()]
     if len(parts)>1:
-        return ' > '.join(parts[:-1]), parts[-1]
+        # Keep the first node as the parent; preserve every deeper level as
+        # the subcategory path (e.g. Products / Acrylic Awards > Alpine Series).
+        return parts[0], ' > '.join(parts[1:])
     return parent, ''
 
 
