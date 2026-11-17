@@ -50,7 +50,13 @@ async def export_families(ls, product, variants, images, markup, category_id):
     from export_format import assert_service_compatible
     assert_service_compatible(ls)
     from export_safety import decode, validate_prices, LIMIT
-    from sku_eligibility import eligibility_reason
+    from sku_eligibility import eligibility_reason, lightspeed_sync_eligible_variants
+    # Defence in depth: this function is a Lightspeed write boundary.
+    # Supplier rows stay in the database; only valid positive-stock variants
+    # may be created or reconciled remotely.
+    variants = lightspeed_sync_eligible_variants(variants)
+    if not variants:
+        raise ValueError('No variants are eligible for Lightspeed: valid positive pricing and inventory are required')
     validate_prices(product, variants)
     if not defer_images.get() and not any(i.get('media_type','image') == 'image' and (i.get('url') or i.get('image_base64')) for i in images):
         raise ValueError('No usable source images; refresh supplier media')
