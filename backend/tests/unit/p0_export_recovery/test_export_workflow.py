@@ -240,6 +240,9 @@ async def test_existing_split_leaves_zero_stock_variant_untouched(
         for row in forwarded
     }
 
-    # Only the positive-stock variant is forwarded to a Lightspeed
-    # mutation path. The existing zero-stock SKU is deliberately omitted.
-    assert set(forwarded_by_sku) == {"SKU-1"}
+    # The wrapper must preserve the complete saved source plan so the
+    # split exporter can verify remote membership and identify the existing
+    # zero-stock member. multi_family filters before every write operation.
+    assert set(forwarded_by_sku) == {"SKU-0", "SKU-1"}
+    assert forwarded_by_sku["SKU-0"]["inventory"] == 0
+    assert forwarded_by_sku["SKU-1"]["inventory"] == 20
