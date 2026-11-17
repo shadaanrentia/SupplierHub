@@ -24,9 +24,8 @@ async def ensure_supplier_mapping_schema(conn):
     # taxonomy level (Acrylic Awards, Clearance, Components, etc.) to parent.
     await conn.execute("""UPDATE products p
         SET category = BTRIM(SPLIT_PART(src.taxonomy, '>', 2)),
-            subcategory = NULLIF(BTRIM(SUBSTRING(src.taxonomy
-                FROM POSITION('>' IN src.taxonomy,
-                     POSITION('>' IN src.taxonomy) + 1) + 1)), ''),
+            subcategory = NULLIF(BTRIM(REGEXP_REPLACE(
+                src.taxonomy, '^[^>]*>[^>]*>\\s*', '')), ''),
             updated_at = NOW()
         FROM (
             SELECT id,
