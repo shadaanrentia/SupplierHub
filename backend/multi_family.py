@@ -78,7 +78,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
             variants_by_id = {str(v['id']): v for v in all_variants}
             groups = [dict(r) for r in await conn.fetch('SELECT * FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2 ORDER BY group_number', key, domain)]
             ids = [str(i) for g in groups for i in decode(g['variant_ids'])]
-            if not groups or len(ids) != len(set(ids)) or set(ids) != {str(v['id']) for v in variants}:
+            if not groups or len(ids) != len(set(ids)) or set(ids) != {str(v['id']) for v in all_variants}:
                 raise ValueError('Review and save a plan covering every eligible variant exactly once')
             if any(g.get('export_mode') not in ('size_families','colour_families') for g in groups):
                 raise ValueError('Old shared-family plan: use Verify deleted destinations, then preview and save size families')
@@ -328,7 +328,8 @@ async def export_families(ls, product, variants, images, markup, category_id):
                         member['active']=row.get('active')
                     await asyncio.gather(*(fill_missing_channels(m) for m in confirmed_members.values()))
                     unconfirmed=[m.get('sku') for m in confirmed_members.values()
-                        if not (isinstance(m.get('active'),dict) and m['active'].get('in_store') is True and m['active'].get('ecwid') is True)]
+                        if sku(m) in write_skus
+                        and not (isinstance(m.get('active'),dict) and m['active'].get('in_store') is True and m['active'].get('ecwid') is True)]
                     if unconfirmed: raise ValueError('POS/eCommerce activation not confirmed for: '+', '.join(str(s) for s in unconfirmed[:5]))
                     family=confirmed
                 import logging
