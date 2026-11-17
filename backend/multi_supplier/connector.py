@@ -10,17 +10,20 @@ def number(value,positive=False):
         return value if math.isfinite(value) and (value>0 if positive else value>=0) else None
     except (ValueError,TypeError):return None
 
-def category_fields(category, subcategory=None):
-    """Normalize a supplier taxonomy into its top-level parent and remaining path."""
-    parent=str(category or '').strip()
+def category_fields(category, subcategory=None, *, strip_products_root=False):
+    """Normalize supplier taxonomy into a parent and its remaining child path.
+
+    Caldwell's API wraps its real taxonomy in a generic "Products" node.
+    Strip that wrapper only for Caldwell; other suppliers keep their own roots.
+    """
+    parts=[part.strip() for part in str(category or '').split('>') if part.strip()]
+    if strip_products_root and parts and parts[0].casefold() == 'products':
+        parts=parts[1:]
+    parent=' > '.join(parts) if parts else ''
     child=str(subcategory or '').strip()
     if child:
-        # If the API already supplies a separate child path, preserve it.
         return parent, child
-    parts=[part.strip() for part in parent.split('>') if part.strip()]
     if len(parts)>1:
-        # Keep the first node as the parent; preserve every deeper level as
-        # the subcategory path (e.g. Products / Acrylic Awards > Alpine Series).
         return parts[0], ' > '.join(parts[1:])
     return parent, ''
 
@@ -126,7 +129,7 @@ class Caldwell(Adapter):
                 if cost is not None:variant['price']=cost
                 if qty is not None and qty.is_integer():variant['inventory']=int(qty)
                 variants.append(variant);images.extend(media(v,[vs]))
-            category,subcategory=category_fields(next(iter(r.get('categories') or []),''),r.get('subcategory'))
+            category,subcategory=category_fields(next(iter(r.get('categories') or []),''),r.get('subcategory'),strip_products_root=True)
             product=dict(product_name=r.get('name') or sku,description=r.get('description') or r.get('short_description') or '',category=category,subcategory=subcategory,variants=variants,_source_metadata=r,_source_product_type=r.get('product_type') or 'simple',_import_media=images)
             costs=[number(v.get('price'),True) for v in variants];cost=number(r.get('final_price'),True) if not variants else min((c for c in costs if c is not None),default=None)
             if cost is not None:product['price']=cost
