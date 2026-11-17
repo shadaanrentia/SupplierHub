@@ -157,7 +157,7 @@ async def test_201_eligible_variants_use_split_export(
     load_images.assert_awaited_once()
 
 @pytest.mark.asyncio
-async def test_existing_split_keeps_zero_stock_variant_for_reconciliation(
+async def test_existing_split_leaves_zero_stock_variant_untouched(
     monkeypatch,
 ):
     """
@@ -243,11 +243,6 @@ async def test_existing_split_keeps_zero_stock_variant_for_reconciliation(
         for row in forwarded
     }
 
-    # Both existing variants must be reconciled.
-    assert set(forwarded_by_sku) == {
-        "SKU-0",
-        "SKU-1",
-    }
-
-    # The out-of-stock variant must retain its zero quantity.
-    assert forwarded_by_sku["SKU-0"]["inventory"] == 0
+    # Only the positive-stock variant is forwarded to a Lightspeed
+    # mutation path. The existing zero-stock SKU is deliberately omitted.
+    assert set(forwarded_by_sku) == {"SKU-1"}
