@@ -466,6 +466,7 @@ export default function ProductDetails({ productId }) {
     ["Supplier", product.supplier_name],
     ["Brand", product.brand],
     ["Supplier category", product.category],
+    ["Supplier subcategory", product.subcategory],
     [
       "Lightspeed category",
       product.lightspeed_category_name || "Needs mapping",
