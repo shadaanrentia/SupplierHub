@@ -20,6 +20,25 @@ async def ensure_supplier_mapping_schema(conn):
     )""")
     await conn.execute("ALTER TABLE supplier_category_links ADD COLUMN IF NOT EXISTS lightspeed_override BOOLEAN NOT NULL DEFAULT FALSE")
     await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory TEXT")
+    # Caldwell's "Products" is only a generic wrapper. Promote the next
+    # taxonomy level (Acrylic Awards, Clearance, Components, etc.) to parent.
+    await conn.execute("""UPDATE products p
+        SET category = BTRIM(SPLIT_PART(src.taxonomy, '>', 2)),
+            subcategory = NULLIF(BTRIM(SUBSTRING(src.taxonomy
+                FROM POSITION('>' IN src.taxonomy,
+                     POSITION('>' IN src.taxonomy) + 1) + 1)), ''),
+            updated_at = NOW()
+        FROM (
+            SELECT id,
+                   COALESCE(source_metadata->'categories'->>0, '') AS taxonomy
+            FROM products
+            WHERE supplier_id IN (
+                SELECT id FROM suppliers
+                WHERE LOWER(supplier_name) LIKE '%caldwell%'
+            )
+        ) src
+        WHERE p.id = src.id
+          AND src.taxonomy ~* '^\\s*Products\\s*>'""")
     # Idempotent backfill: recover subcategories from retained source metadata or
     # split legacy full paths. Existing parent/child values take precedence.
     await conn.execute("""UPDATE products
