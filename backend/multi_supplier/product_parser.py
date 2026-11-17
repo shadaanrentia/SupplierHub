@@ -23,6 +23,30 @@ NS = {
 }
 
 
+def _local_name(element):
+    """Return an XML element's local name regardless of its namespace."""
+    try:
+        return etree.QName(element).localname.casefold()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _first_by_local_name(element, *names):
+    wanted = {name.casefold() for name in names}
+    return next(
+        (node for node in element.iter() if _local_name(node) in wanted),
+        None,
+    )
+
+
+def _text_by_local_name(element, *names):
+    found = _first_by_local_name(element, *names)
+    if found is None or found.text is None:
+        return None
+    value = found.text.strip()
+    return value or None
+
+
 def get_text(element, xpath, default=None):
     """
     Safely retrieve text from an XML element.
@@ -102,18 +126,11 @@ def parse_product(xml_text: str) -> dict:
     # Check SOAP fault
     # -----------------------------------------
 
-    fault = root.find(
-        ".//soap:Fault",
-        namespaces=NS
-    )
+    fault = _first_by_local_name(root, "Fault")
 
     if fault is not None:
 
-        fault_string = get_text(
-            fault,
-            "faultstring",
-            "Unknown SOAP fault"
-        )
+        fault_string = _text_by_local_name(fault, "faultstring") or "Unknown SOAP fault"
 
         raise ValueError(
             f"SOAP Fault: {fault_string}"
@@ -123,10 +140,7 @@ def parse_product(xml_text: str) -> dict:
     # Find Product
     # -----------------------------------------
 
-    product = root.find(
-        ".//pd:Product",
-        namespaces=NS
-    )
+    product = _first_by_local_name(root, "Product")
 
     if product is None:
         raise ValueError(
@@ -207,21 +221,17 @@ def parse_product(xml_text: str) -> dict:
     # Category
     # -----------------------------------------
 
-    category_element = product.find(
-        ".//shared:ProductCategory",
-        namespaces=NS
-    )
+    # Supplier responses are not always consistent about namespace URI or
+    # prefixes. Match category fields by XML local name so a namespace
+    # variation cannot silently discard the subcategory.
+    category_element = _first_by_local_name(product, "ProductCategory")
 
     if category_element is not None:
-
-        result["category"] = get_text(
-            category_element,
-            "shared:category"
+        result["category"] = _text_by_local_name(
+            category_element, "category", "categoryName"
         )
-
-        result["subcategory"] = get_text(
-            category_element,
-            "shared:subCategory"
+        result["subcategory"] = _text_by_local_name(
+            category_element, "subCategory", "subcategory", "subCategoryName"
         )
 
     # -----------------------------------------
