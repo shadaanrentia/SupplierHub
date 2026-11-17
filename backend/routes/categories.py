@@ -23,32 +23,38 @@ async def ensure_supplier_mapping_schema(conn):
     # Idempotent backfill: recover subcategories from retained source metadata or
     # split legacy full paths. Existing parent/child values take precedence.
     await conn.execute("""UPDATE products
-        SET subcategory = COALESCE(
-                NULLIF(BTRIM(subcategory), ''),
-                NULLIF(BTRIM(source_metadata->>'subcategory'), ''),
-                NULLIF(BTRIM(source_metadata->>'subCategory'), ''),
-                CASE WHEN POSITION('>' IN COALESCE(category,'')) > 0
-                     THEN BTRIM(REGEXP_REPLACE(category, '^.*>\\s*', ''))
-                END
-            ),
+        SET subcategory = CASE
+                WHEN jsonb_typeof(source_metadata->'categories') = 'array'
+                     AND POSITION('>' IN COALESCE(source_metadata->'categories'->>0,'')) > 0
+                    THEN BTRIM(SUBSTRING(source_metadata->'categories'->>0
+                         FROM POSITION('>' IN source_metadata->'categories'->>0) + 1))
+                ELSE COALESCE(
+                    NULLIF(BTRIM(source_metadata->>'subcategory'), ''),
+                    NULLIF(BTRIM(source_metadata->>'subCategory'), ''),
+                    CASE WHEN POSITION('>' IN COALESCE(category,'')) > 0
+                         THEN BTRIM(SUBSTRING(category FROM POSITION('>' IN category) + 1))
+                    END,
+                    NULLIF(BTRIM(subcategory), '')
+                )
+            END,
             category = CASE
+                WHEN jsonb_typeof(source_metadata->'categories') = 'array'
+                     AND POSITION('>' IN COALESCE(source_metadata->'categories'->>0,'')) > 0
+                    THEN BTRIM(SPLIT_PART(source_metadata->'categories'->>0, '>', 1))
                 WHEN (NULLIF(BTRIM(source_metadata->>'subcategory'), '') IS NOT NULL
                       OR NULLIF(BTRIM(source_metadata->>'subCategory'), '') IS NOT NULL)
                      AND NULLIF(BTRIM(source_metadata->>'category'), '') IS NOT NULL
                     THEN BTRIM(source_metadata->>'category')
                 WHEN POSITION('>' IN COALESCE(category,'')) > 0
-                    THEN BTRIM(REGEXP_REPLACE(category, '\\s*>\\s*[^>]*$', ''))
+                    THEN BTRIM(SPLIT_PART(category, '>', 1))
                 ELSE category
             END,
             updated_at = NOW()
-        WHERE (NULLIF(BTRIM(subcategory), '') IS NULL
-               AND (NULLIF(BTRIM(source_metadata->>'subcategory'), '') IS NOT NULL
-                    OR NULLIF(BTRIM(source_metadata->>'subCategory'), '') IS NOT NULL
-                    OR POSITION('>' IN COALESCE(category,'')) > 0))
-           OR ((NULLIF(BTRIM(source_metadata->>'subcategory'), '') IS NOT NULL
-                OR NULLIF(BTRIM(source_metadata->>'subCategory'), '') IS NOT NULL)
-               AND NULLIF(BTRIM(source_metadata->>'category'), '') IS NOT NULL
-               AND category IS DISTINCT FROM BTRIM(source_metadata->>'category'))""")
+        WHERE (jsonb_typeof(source_metadata->'categories') = 'array'
+               AND POSITION('>' IN COALESCE(source_metadata->'categories'->>0,'')) > 0)
+           OR NULLIF(BTRIM(source_metadata->>'subcategory'), '') IS NOT NULL
+           OR NULLIF(BTRIM(source_metadata->>'subCategory'), '') IS NOT NULL
+           OR POSITION('>' IN COALESCE(category,'')) > 0""")
 
 
 @router.on_event("startup")
