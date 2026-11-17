@@ -174,7 +174,8 @@ class Athletic(Adapter):
                 if price is not None:x['price']=price
                 variants.append(x)
             category,subcategory=category_fields(r.get('category'),r.get('subcategory'))
-            product=dict(product_name=r['name'],description=r.get('description') or '',brand=r.get('brand') or '',category=category,subcategory=subcategory,variants=variants,_source_metadata=r,_source_product_type='configurable' if variants else 'simple')
+            name=str(r['name']).strip(); name=name if name.casefold().startswith('athletic knit ') or name.casefold()=='athletic knit' else 'Athletic Knit '+name
+            product=dict(product_name=name,description=r.get('description') or '',brand=r.get('brand') or 'Athletic Knit',category=category,subcategory=subcategory,variants=variants,_source_metadata=r,_source_product_type='configurable' if variants else 'simple')
             costs=[v['price'] for v in variants if v.get('price')]
             if costs:product['price']=min(costs)
             return {'product':product}
