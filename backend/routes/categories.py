@@ -6,6 +6,7 @@ from deps import row_to_dict, new_id, get_current_user
 router = APIRouter(prefix="/api")
 
 
+
 async def ensure_supplier_mapping_schema(conn):
     await conn.execute("""CREATE TABLE IF NOT EXISTS supplier_category_links (
         id VARCHAR(64) PRIMARY KEY,
@@ -18,10 +19,20 @@ async def ensure_supplier_mapping_schema(conn):
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE(supplier_id,store_domain,supplier_category_name)
     )""")
-    await conn.execute("ALTER TABLE supplier_category_links ADD COLUMN IF NOT EXISTS lightspeed_override BOOLEAN NOT NULL DEFAULT FALSE")
-    await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory TEXT")
-    # Caldwell's "Products" is only a generic wrapper. Promote the next
-    # taxonomy level (Acrylic Awards, Clearance, Components, etc.) to parent.
+
+    await conn.execute("""
+        ALTER TABLE supplier_category_links
+        ADD COLUMN IF NOT EXISTS lightspeed_override BOOLEAN NOT NULL DEFAULT FALSE
+    """)
+
+    await conn.execute("""
+        ALTER TABLE products
+        ADD COLUMN IF NOT EXISTS subcategory TEXT
+    """)
+
+    # Caldwell-specific normalization:
+    # Remove the generic Products wrapper and promote the next taxonomy
+    # level to the parent category.
     await conn.execute("""UPDATE products p
         SET category = BTRIM(SPLIT_PART(src.taxonomy, '>', 2)),
             subcategory = NULLIF(BTRIM(REGEXP_REPLACE(
@@ -32,14 +43,19 @@ async def ensure_supplier_mapping_schema(conn):
                    COALESCE(source_metadata->'categories'->>0, '') AS taxonomy
             FROM products
             WHERE supplier_id IN (
-                SELECT id FROM suppliers
+                SELECT id
+                FROM suppliers
                 WHERE LOWER(supplier_name) LIKE '%caldwell%'
             )
         ) src
         WHERE p.id = src.id
-          AND src.taxonomy ~* '^\\s*Products\\s*>'""")
-    # Idempotent backfill: recover subcategories from retained source metadata or
-    # split legacy full paths. Existing parent/child values take precedence.
+          AND src.taxonomy ~* '^\\s*Products\\s*>'
+    """)
+
+    # Generic idempotent backfill:
+    # Recover subcategories from source metadata or legacy full paths.
+    # Exclude Caldwell because its hierarchy has already been normalized
+    # by the dedicated update above.
     await conn.execute("""UPDATE products
         SET subcategory = CASE
                 WHEN jsonb_typeof(source_metadata->'categories') = 'array'
@@ -68,11 +84,19 @@ async def ensure_supplier_mapping_schema(conn):
                 ELSE category
             END,
             updated_at = NOW()
-        WHERE (jsonb_typeof(source_metadata->'categories') = 'array'
-               AND POSITION('>' IN COALESCE(source_metadata->'categories'->>0,'')) > 0)
-           OR NULLIF(BTRIM(source_metadata->>'subcategory'), '') IS NOT NULL
-           OR NULLIF(BTRIM(source_metadata->>'subCategory'), '') IS NOT NULL
-           OR POSITION('>' IN COALESCE(category,'')) > 0""")
+        WHERE (
+               (jsonb_typeof(source_metadata->'categories') = 'array'
+                AND POSITION('>' IN COALESCE(source_metadata->'categories'->>0,'')) > 0)
+            OR NULLIF(BTRIM(source_metadata->>'subcategory'), '') IS NOT NULL
+            OR NULLIF(BTRIM(source_metadata->>'subCategory'), '') IS NOT NULL
+            OR POSITION('>' IN COALESCE(category,'')) > 0
+        )
+        AND supplier_id NOT IN (
+            SELECT id
+            FROM suppliers
+            WHERE LOWER(supplier_name) LIKE '%caldwell%'
+        )
+    """)
 
 
 @router.on_event("startup")
