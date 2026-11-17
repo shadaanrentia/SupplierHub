@@ -1,6 +1,5 @@
 """Category mapping routes."""
 from fastapi import APIRouter, Depends, HTTPException
-import json
 import deps
 from deps import row_to_dict, new_id, get_current_user
 
@@ -20,6 +19,60 @@ async def ensure_supplier_mapping_schema(conn):
         UNIQUE(supplier_id,store_domain,supplier_category_name)
     )""")
     await conn.execute("ALTER TABLE supplier_category_links ADD COLUMN IF NOT EXISTS lightspeed_override BOOLEAN NOT NULL DEFAULT FALSE")
+    await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory TEXT")
+    # Caldwell's "Products" is only a generic wrapper. Promote the next
+    # taxonomy level (Acrylic Awards, Clearance, Components, etc.) to parent.
+    await conn.execute("""UPDATE products p
+        SET category = BTRIM(SPLIT_PART(src.taxonomy, '>', 2)),
+            subcategory = NULLIF(BTRIM(REGEXP_REPLACE(
+                src.taxonomy, '^[^>]*>[^>]*>\\s*', '')), ''),
+            updated_at = NOW()
+        FROM (
+            SELECT id,
+                   COALESCE(source_metadata->'categories'->>0, '') AS taxonomy
+            FROM products
+            WHERE supplier_id IN (
+                SELECT id FROM suppliers
+                WHERE LOWER(supplier_name) LIKE '%caldwell%'
+            )
+        ) src
+        WHERE p.id = src.id
+          AND src.taxonomy ~* '^\\s*Products\\s*>'""")
+    # Idempotent backfill: recover subcategories from retained source metadata or
+    # split legacy full paths. Existing parent/child values take precedence.
+    await conn.execute("""UPDATE products
+        SET subcategory = CASE
+                WHEN jsonb_typeof(source_metadata->'categories') = 'array'
+                     AND POSITION('>' IN COALESCE(source_metadata->'categories'->>0,'')) > 0
+                    THEN BTRIM(SUBSTRING(source_metadata->'categories'->>0
+                         FROM POSITION('>' IN source_metadata->'categories'->>0) + 1))
+                ELSE COALESCE(
+                    NULLIF(BTRIM(source_metadata->>'subcategory'), ''),
+                    NULLIF(BTRIM(source_metadata->>'subCategory'), ''),
+                    CASE WHEN POSITION('>' IN COALESCE(category,'')) > 0
+                         THEN BTRIM(SUBSTRING(category FROM POSITION('>' IN category) + 1))
+                    END,
+                    NULLIF(BTRIM(subcategory), '')
+                )
+            END,
+            category = CASE
+                WHEN jsonb_typeof(source_metadata->'categories') = 'array'
+                     AND POSITION('>' IN COALESCE(source_metadata->'categories'->>0,'')) > 0
+                    THEN BTRIM(SPLIT_PART(source_metadata->'categories'->>0, '>', 1))
+                WHEN (NULLIF(BTRIM(source_metadata->>'subcategory'), '') IS NOT NULL
+                      OR NULLIF(BTRIM(source_metadata->>'subCategory'), '') IS NOT NULL)
+                     AND NULLIF(BTRIM(source_metadata->>'category'), '') IS NOT NULL
+                    THEN BTRIM(source_metadata->>'category')
+                WHEN POSITION('>' IN COALESCE(category,'')) > 0
+                    THEN BTRIM(SPLIT_PART(category, '>', 1))
+                ELSE category
+            END,
+            updated_at = NOW()
+        WHERE (jsonb_typeof(source_metadata->'categories') = 'array'
+               AND POSITION('>' IN COALESCE(source_metadata->'categories'->>0,'')) > 0)
+           OR NULLIF(BTRIM(source_metadata->>'subcategory'), '') IS NOT NULL
+           OR NULLIF(BTRIM(source_metadata->>'subCategory'), '') IS NOT NULL
+           OR POSITION('>' IN COALESCE(category,'')) > 0""")
 
 
 @router.on_event("startup")
@@ -42,10 +95,14 @@ async def get_supplier_categories(supplier_id: str = None, user: dict = Depends(
     async with deps.pool.acquire() as conn:
         if supplier_id:
             await checked_supplier(conn, supplier_id)
-        rows = await conn.fetch("""SELECT DISTINCT category FROM products
+        rows = await conn.fetch("""SELECT DISTINCT
+                CASE WHEN NULLIF(BTRIM(subcategory), '') IS NOT NULL
+                     THEN BTRIM(category) || ' > ' || BTRIM(subcategory)
+                     ELSE BTRIM(category) END AS category
+            FROM products
             WHERE category IS NOT NULL AND BTRIM(category)<>''
               AND ($1::varchar IS NULL OR supplier_id=$1)
-            ORDER BY category""", supplier_id)
+            ORDER BY 1""", supplier_id)
         return {"supplier_id": supplier_id, "categories": [r['category'] for r in rows]}
 
 
@@ -88,7 +145,12 @@ async def create_or_update_mapping(data: dict, user: dict = Depends(get_current_
             domain = await mapping_store(conn)
             if 'lightspeed_category_id' in data and not domain:
                 raise HTTPException(400, "Configure Lightspeed in Settings first")
-            if not await conn.fetchval("SELECT 1 FROM products WHERE supplier_id=$1 AND category=$2 LIMIT 1", supplier_id, category):
+            if not await conn.fetchval("""SELECT 1 FROM products
+                    WHERE supplier_id=$1
+                      AND (CASE WHEN NULLIF(BTRIM(subcategory), '') IS NOT NULL
+                                THEN BTRIM(category) || ' > ' || BTRIM(subcategory)
+                                ELSE BTRIM(category) END)=$2
+                    LIMIT 1""", supplier_id, category):
                 raise HTTPException(400, "Category does not belong to this supplier's imported products")
             if cid and await conn.fetchval("SELECT to_regclass('public.lightspeed_category_snapshots')"):
                 snapshot = await conn.fetchval("SELECT categories FROM lightspeed_category_snapshots WHERE store_domain=$1", domain.lower())
@@ -107,18 +169,20 @@ async def create_or_update_mapping(data: dict, user: dict = Depends(get_current_
                         updated_at=NOW()""",new_id(),supplier_id,domain,category,cid,oid,
                         'lightspeed_category_id' in data,'odoo_category_id' in data)
                 await conn.execute("""UPDATE products SET preprocessing_status='pending',updated_at=NOW()
-                    WHERE supplier_id=$1 AND category=$2""", supplier_id,category)
+                    WHERE supplier_id=$1
+                      AND (CASE WHEN NULLIF(BTRIM(subcategory), '') IS NOT NULL
+                                THEN BTRIM(category) || ' > ' || BTRIM(subcategory)
+                                ELSE BTRIM(category) END)=$2""", supplier_id,category)
         return {"success": True}
     supplier_category = data.get('supplier_category_name')
     odoo_category_id = data.get('odoo_category_id')
-    lightspeed_category_id = data.get('lightspeed_category_id')  # UUID string or None
+    lightspeed_category_id = data.get('lightspeed_category_id')
     if not supplier_category:
         raise HTTPException(400, "Supplier category name is required")
     async with deps.pool.acquire() as conn:
         existing = await conn.fetchrow(
             "SELECT id FROM category_mapping WHERE supplier_category_name = $1", supplier_category)
         if existing:
-            # Update existing mapping
             if 'odoo_category_id' in data:
                 await conn.execute(
                     "UPDATE category_mapping SET odoo_category_id = $1, updated_at = NOW() WHERE supplier_category_name = $2",

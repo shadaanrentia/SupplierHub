@@ -378,16 +378,25 @@ async def save_product(conn,supplier_id,sku,product):
     existing=await conn.fetchrow('SELECT id FROM products WHERE supplier_id=$1 AND supplier_sku=$2',supplier_id,sku)
     product_id=existing['id'] if existing else new_id()
     bulk_time=datetime.fromisoformat(product['_bulk_fetched_at']) if product.get('_bulk_fetched_at') else None
+    category=str(product.get('category') or '').strip()
+    subcategory=str(product.get('subcategory') or '').strip()
+    # Suppliers that expose a complete taxonomy path are normalized into
+    # separate parent-path and leaf fields. The API recombines them for mapping.
+    if not subcategory and '>' in category:
+        parts=[part.strip() for part in category.split('>') if part.strip()]
+        if len(parts)>1:
+            category=' > '.join(parts[:-1])
+            subcategory=parts[-1]
     if existing:
         # Product Data commonly omits pricing. Do not send zero to the price guard for an omitted field.
-        await conn.execute('UPDATE products SET product_name=$1,description=CASE WHEN description_source=\'bulk_data\' AND $6::boolean=FALSE THEN description ELSE COALESCE(NULLIF($2,\'\'),description) END,brand=COALESCE(NULLIF($3,\'\'),brand),category=COALESCE(NULLIF($4,\'\'),category),last_synced=NOW(),updated_at=NOW() WHERE id=$5',product.get('product_name') or sku,product.get('description',''),product.get('brand',''),product.get('category',''),product_id,bool(product.get('_bulk_source')))
+        await conn.execute('UPDATE products SET product_name=$1,description=CASE WHEN description_source=\'bulk_data\' AND $7::boolean=FALSE THEN description ELSE COALESCE(NULLIF($2,\'\'),description) END,brand=COALESCE(NULLIF($3,\'\'),brand),category=COALESCE(NULLIF($4,\'\'),category),subcategory=COALESCE(NULLIF($5,\'\'),subcategory),last_synced=NOW(),updated_at=NOW() WHERE id=$6',product.get('product_name') or sku,product.get('description',''),product.get('brand',''),category or None,subcategory or None,product_id,bool(product.get('_bulk_source')))
         if 'price' in product:
             if positive(product['price']):
                 await conn.execute('UPDATE products SET base_price=$2,updated_at=NOW() WHERE id=$1 AND ($3::timestamptz IS NULL OR pricing_synced_at IS NULL OR pricing_synced_at<=$3)',product_id,float(product['price']),bulk_time)
             else:
                 await conn.execute('UPDATE products SET price_needs_review=TRUE WHERE id=$1',product_id)
     else:
-        await conn.execute('INSERT INTO products(id,supplier_id,supplier_sku,product_name,description,brand,category,base_price,last_synced,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW(),NOW())',product_id,supplier_id,sku,product.get('product_name') or sku,product.get('description',''),product.get('brand',''),product.get('category',''),float(product.get('price')) if positive(product.get('price')) else 0)
+        await conn.execute('INSERT INTO products(id,supplier_id,supplier_sku,product_name,description,brand,category,subcategory,base_price,last_synced,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW(),NOW())',product_id,supplier_id,sku,product.get('product_name') or sku,product.get('description',''),product.get('brand',''),category,subcategory or None,float(product.get('price')) if positive(product.get('price')) else 0)
     seen=set()
     for variant in product.get('variants',[]):
         key=str(variant.get('variant_sku') or '').strip()

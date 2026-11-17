@@ -499,6 +499,10 @@ export default function Products() {
                     <dt>Category</dt>
                     <dd>{String(product.category||" ").trim() || "Uncategorized"}</dd>
                   </div>
+                  <div>
+                    <dt>Subcategory</dt>
+                    <dd>{String(product.subcategory||" ").trim() || "—"}</dd>
+                  </div>
                   <div><dt>Inventory</dt><dd title="Saved variant inventory total">{product.inventory_total==null?'—':Number(product.inventory_total).toLocaleString()}</dd></div>
                   <div>
                     <dt>Supplier</dt>
@@ -526,6 +530,7 @@ export default function Products() {
                 <th>Product</th>
                 <th>Brand</th>
                 <th>Category</th>
+                <th>Subcategory</th>
                 <th>Supplier</th>
                 <th>Variants</th>
                 <th>Inventory</th><th>Supplier price</th>
@@ -543,6 +548,7 @@ export default function Products() {
                   </td>
                   <td>{String(product.brand||" ").trim() || "—"}</td>
                   <td>{String(product.category||" ").trim() || "Uncategorized"}</td>
+                  <td>{String(product.subcategory||" ").trim() || "—"}</td>
                   <td>{product.supplier_name || "—"}</td>
                   <td>{product.variant_count ?? 0}</td>
                   <td>{product.inventory_total==null?'—':Number(product.inventory_total).toLocaleString()}</td><td>

@@ -10,6 +10,24 @@ def number(value,positive=False):
         return value if math.isfinite(value) and (value>0 if positive else value>=0) else None
     except (ValueError,TypeError):return None
 
+def category_fields(category, subcategory=None, *, strip_products_root=False):
+    """Normalize supplier taxonomy into a parent and its remaining child path.
+
+    Caldwell's API wraps its real taxonomy in a generic "Products" node.
+    Strip that wrapper only for Caldwell; other suppliers keep their own roots.
+    """
+    parts=[part.strip() for part in str(category or '').split('>') if part.strip()]
+    if strip_products_root and parts and parts[0].casefold() == 'products':
+        parts=parts[1:]
+    parent=' > '.join(parts) if parts else ''
+    child=str(subcategory or '').strip()
+    if child:
+        return parent, child
+    if len(parts)>1:
+        return parts[0], ' > '.join(parts[1:])
+    return parent, ''
+
+
 def options(rows):
     result={}
     for text in rows or []:
@@ -111,7 +129,8 @@ class Caldwell(Adapter):
                 if cost is not None:variant['price']=cost
                 if qty is not None and qty.is_integer():variant['inventory']=int(qty)
                 variants.append(variant);images.extend(media(v,[vs]))
-            product=dict(product_name=r.get('name') or sku,description=r.get('description') or r.get('short_description') or '',category=next(iter(r.get('categories') or []),''),variants=variants,_source_metadata=r,_source_product_type=r.get('product_type') or 'simple',_import_media=images)
+            category,subcategory=category_fields(next(iter(r.get('categories') or []),''),r.get('subcategory'),strip_products_root=True)
+            product=dict(product_name=r.get('name') or sku,description=r.get('description') or r.get('short_description') or '',category=category,subcategory=subcategory,variants=variants,_source_metadata=r,_source_product_type=r.get('product_type') or 'simple',_import_media=images)
             costs=[number(v.get('price'),True) for v in variants];cost=number(r.get('final_price'),True) if not variants else min((c for c in costs if c is not None),default=None)
             if cost is not None:product['price']=cost
             return {'product':product}
@@ -154,8 +173,8 @@ class Athletic(Adapter):
                 price=number(tiers[0].get('price'),True) if tiers else None
                 if price is not None:x['price']=price
                 variants.append(x)
-            category_parts=[str(value).strip() for value in (r.get('category'),r.get('subcategory')) if value and str(value).strip()];category_label=' > '.join(dict.fromkeys(category_parts))
-            product=dict(product_name=r['name'],description=r.get('description') or '',brand=r.get('brand') or '',category=category_label,variants=variants,_source_metadata=r,_source_product_type='configurable' if variants else 'simple')
+            category,subcategory=category_fields(r.get('category'),r.get('subcategory'))
+            product=dict(product_name=r['name'],description=r.get('description') or '',brand=r.get('brand') or '',category=category,subcategory=subcategory,variants=variants,_source_metadata=r,_source_product_type='configurable' if variants else 'simple')
             costs=[v['price'] for v in variants if v.get('price')]
             if costs:product['price']=min(costs)
             return {'product':product}
