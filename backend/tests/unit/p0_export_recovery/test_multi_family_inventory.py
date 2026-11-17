@@ -141,7 +141,7 @@ def existing_family_environment(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_existing_family_forwards_zero_inventory(
+async def test_existing_family_leaves_zero_inventory_variant_untouched(
     existing_family_environment,
 ):
     ls, conn, product, variants, images, repair = (
@@ -164,9 +164,11 @@ async def test_existing_family_forwards_zero_inventory(
         for v in forwarded
     }
 
-    assert set(by_sku) == {"SKU-S", "SKU-M"}
-    assert by_sku["SKU-S"]["inventory"] == 0
+    # Only positive-stock variants may be sent to Lightspeed mutation paths.
+    assert set(by_sku) == {"SKU-M"}
     assert by_sku["SKU-M"]["inventory"] == 20
+    repair_kwargs = repair.await_args.kwargs
+    assert {v["variant_sku"] for v in repair_kwargs["variants"]} == {"SKU-M"}
 
     # An existing family must not create a second product.
     assert ls.lookup_skus.call_count == 0
@@ -187,9 +189,10 @@ async def test_existing_family_does_not_recreate_product(
 
     assert result["success"] is True, result
 
-    # Existing verified destinations should be updated in place.
+    # Existing destinations are updated in place, but only eligible members.
     assert ls.remote_family.call_count >= 1
-    ls._sync_existing_variants.assert_awaited_once()
+    args = ls._sync_existing_variants.await_args.args
+    assert [v["variant_sku"] for v in args[1]] == ["SKU-M"]
 
 
 @pytest.mark.asyncio
