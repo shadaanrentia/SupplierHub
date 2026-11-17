@@ -162,11 +162,8 @@ async def test_existing_split_leaves_zero_stock_variant_untouched(
 ):
     """
     Regression requirement:
-    An existing split-family product must still send its
-    zero-stock variants through inventory reconciliation.
-
-    This test is expected to fail against the current
-    eligibility filtering implementation.
+    Existing zero-stock variants remain part of the saved source plan,
+    but are omitted from every Lightspeed mutation path.
     """
     import pricing_rules
     import export_format
