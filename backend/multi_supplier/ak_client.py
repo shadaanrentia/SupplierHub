@@ -42,6 +42,14 @@ MEDIA_SHARED_NS = (
     "WSDL/MediaService/1.0.0/SharedObjects/"
 )
 
+PRICING_NS = (
+    "http://www.promostandards.org/WSDL/PricingAndConfiguration/1.0.0/"
+)
+
+PRICING_SHARED_NS = (
+    "http://www.promostandards.org/WSDL/PricingAndConfiguration/1.0.0/SharedObjects/"
+)
+
 class AthleticKnitClient:
 
     def __init__(self,supplier):
@@ -240,6 +248,33 @@ class AthleticKnitClient:
             endpoint=self.product_url,
             body_xml=body,
             soap_action="getProduct"
+        )
+
+    def get_configuration_and_pricing_raw(self, product_id: str) -> str:
+        """Fetch customer price breaks from PromoStandards Pricing & Configuration."""
+        if not self.pricing_url:
+            raise ValueError("Enter the Athletic Knit Pricing and Configuration service URL")
+
+        body = f"""
+        <ns:GetConfigurationAndPricingRequest
+            xmlns:ns="{PRICING_NS}"
+            xmlns:shar="{PRICING_SHARED_NS}">
+            <shar:wsVersion>2.0.0</shar:wsVersion>
+            <shar:id>{escape(self.account_id)}</shar:id>
+            <shar:password>{escape(self.password)}</shar:password>
+            <shar:productId>{escape(product_id)}</shar:productId>
+            <shar:currency>CAD</shar:currency>
+            <shar:priceType>Customer</shar:priceType>
+            <shar:localizationCountry>{escape(self.country)}</shar:localizationCountry>
+            <shar:localizationLanguage>{escape(self.language)}</shar:localizationLanguage>
+            <shar:configurationType></shar:configurationType>
+        </ns:GetConfigurationAndPricingRequest>
+        """
+
+        return self._soap_post(
+            endpoint=self.pricing_url,
+            body_xml=body,
+            soap_action="getConfigurationAndPricing"
         )
 
     def get_inventory_raw(
