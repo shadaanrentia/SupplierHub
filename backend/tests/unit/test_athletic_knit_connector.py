@@ -134,3 +134,38 @@ def test_product_category_preserves_athletic_knit_subcategory():
     # supplier-wide category hierarchy and Products page fields.
     assert result["product"]["category"] == "Apparel"
     assert result["product"]["subcategory"] == "Hockey Jerseys"
+
+
+def test_product_title_has_athletic_knit_prefix_and_default_brand():
+    connector = make_connector()
+    connector.parsed = lambda sku: {
+        "name": "Hockey Jersey",
+        "description": "Team jersey",
+        "brand": None,
+        "category": "Apparel",
+        "subcategory": "Hockey Jerseys",
+        "variants": [],
+    }
+
+    result = connector.get_product("AK-100")
+
+    assert result["success"] is True
+    assert result["product"]["product_name"] == "Athletic Knit Hockey Jersey"
+    assert result["product"]["brand"] == "Athletic Knit"
+
+
+def test_product_title_does_not_duplicate_athletic_knit_prefix():
+    connector = make_connector()
+    connector.parsed = lambda sku: {
+        "name": "Athletic Knit Hockey Jersey",
+        "description": "Team jersey",
+        "brand": "Athletic Knit",
+        "category": "Apparel",
+        "subcategory": "Hockey Jerseys",
+        "variants": [],
+    }
+
+    result = connector.get_product("AK-100")
+
+    assert result["success"] is True
+    assert result["product"]["product_name"] == "Athletic Knit Hockey Jersey"
