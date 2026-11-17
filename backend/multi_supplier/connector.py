@@ -180,8 +180,17 @@ class Athletic(Adapter):
             if costs:product['price']=min(costs)
             return {'product':product}
         return self.result(work)
+    def pricing_parsed(self, sku):
+        from .pricing_parser import parse_configuration_and_pricing
+        return parse_configuration_and_pricing(
+            self.client.get_configuration_and_pricing_raw(sku)
+        )
+
     def get_pricing(self,sku):
-        return self.result(lambda:{'pricing':[{'part_id':v['part_id'],'prices':[dict(min_quantity=p.get('quantity_min') or 1,price=p.get('price')) for p in v.get('prices') or []]} for v in self.parsed(sku).get('variants',[])]})
+        def work():
+            data=self.pricing_parsed(sku)
+            return {'currency':data.get('currency') or 'CAD','price_type':data.get('price_type') or 'Customer','pricing':data.get('pricing',[])}
+        return self.result(work)
     def get_inventory(self,sku):
         def work():
             from .inventory_parser import parse_inventory
