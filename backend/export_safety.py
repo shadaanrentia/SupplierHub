@@ -6,7 +6,7 @@ import json
 import math
 import deps
 from size_order import size_key, sort_variants
-from sku_eligibility import eligible_variants, new_export_eligible_variants
+from sku_eligibility import lightspeed_sync_eligible_variants
 from deps import row_to_dict, calculate_sale_price
 
 MAX_VARIANTS_PER_FAMILY = 199
@@ -175,10 +175,7 @@ async def _legacy_export_product(
     allow_zero_inventory=False,
 ):
     """Shared entry point used by normal pushes and the split-export page."""
-    from sku_eligibility import (
-    eligible_variants,
-    new_export_eligible_variants,
-    )
+    from sku_eligibility import lightspeed_sync_eligible_variants
 
     active = [
         dict(v)
@@ -186,14 +183,11 @@ async def _legacy_export_product(
         if v.get("is_active") is not False
     ]
 
-    if allow_zero_inventory:
-        # Existing Lightspeed product: retain zero-stock variants
-        # so inventory reconciliation can send quantity 0.
-        variants = eligible_variants(active)
-    else:
-        # New Lightspeed product: only positive-stock variants
-        # may be included in the initial creation.
-        variants = new_export_eligible_variants(active)
+    # Only positive-stock variants with a verified positive price may be
+    # written to Lightspeed. Ineligible source rows remain in SupplierHub;
+    # an existing remote variant is intentionally omitted from the payload
+    # so its last valid price and remote inventory are not overwritten.
+    variants = lightspeed_sync_eligible_variants(active)
 
     if active and not variants:
         raise ValueError(
@@ -299,11 +293,9 @@ async def export_product(ls, product, variants, images, markup, category_id):
         dict(v) for v in variants
         if v.get("is_active") is not False
     ]
-    eligible = (
-        eligible_variants(active)
-        if product.get("lightspeed_product_id")
-        else new_export_eligible_variants(active)
-    )
+    # Same write-eligibility policy for new and existing products, regardless
+    # of supplier. Zero-stock and invalid-price rows remain stored locally.
+    eligible = lightspeed_sync_eligible_variants(active)
 
     async with deps.pool.acquire() as conn:
         groups = [
@@ -320,10 +312,7 @@ async def export_product(ls, product, variants, images, markup, category_id):
 
     if groups:
         by_id = {str(v["id"]): v for v in active}
-        new_eligible_ids = {
-            str(v["id"])
-            for v in new_export_eligible_variants(active)
-        }
+        sync_eligible_ids = {str(v["id"]) for v in eligible}
 
         saved_ids = [
             str(variant_id)
@@ -342,25 +331,19 @@ async def export_product(ls, product, variants, images, markup, category_id):
                 "review the plan before synchronization"
             )
 
-        # Zero-stock variants may be reconciled only within
-        # groups that already have a saved destination.
-        for group in groups:
-            group_ids = {
-                str(variant_id)
-                for variant_id in decode(group["variant_ids"])
-            }
+        # A saved split plan must be reviewed when it contains source rows
+        # that are no longer safe to write. Do not silently reassign group
+        # membership or risk reconciling/deleting an existing remote variant.
+        ineligible_saved = sorted(set(saved_ids) - sync_eligible_ids)
+        if ineligible_saved:
+            raise ValueError(
+                f"{len(ineligible_saved)} variant(s) in the saved split plan "
+                "now have zero/invalid inventory or invalid pricing. "
+                "Keep those supplier records, remove them from the export "
+                "plan in Export Review, then sync again."
+            )
 
-            if not group.get("lightspeed_product_id"):
-                if not group_ids.issubset(new_eligible_ids):
-                    raise ValueError(
-                        "Uncreated export group contains ineligible "
-                        "variants; review the split plan"
-                    )
-
-        selected = [
-            by_id[variant_id]
-            for variant_id in saved_ids
-        ]
+        selected = [by_id[variant_id] for variant_id in saved_ids]
 
         from multi_family import export_families
         return await export_families(
