@@ -144,7 +144,13 @@ async def export_families(ls, product, variants, images, markup, category_id):
                     raise ValueError('Previous creation outcome cannot be verified; no duplicate creation sent')
                 if planned_family:
                     remote = members(planned_family)
-                    missing = [v for v in planned_batch if sku(v) not in remote]
+                    # Only eligible variants can be candidates for a remote
+                    # addition. An absent zero-stock SKU is intentionally left
+                    # alone and must not enter duplicate-addition recovery.
+                    missing = [
+                        v for v in planned_batch
+                        if sku(v) not in remote and str(v['id']) in write_by_id
+                    ]
                     if len(remote) + len(missing) > LIMIT:
                         raise ValueError(f'Family would exceed the maximum of {LIMIT} variants')
                     for variant in missing:
