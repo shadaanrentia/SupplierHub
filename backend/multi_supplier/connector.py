@@ -200,8 +200,63 @@ class Athletic(Adapter):
     def get_media(self,sku):
         def work():
             from .media_parser import parse_media
-            r=parse_media(self.client.get_media_raw(sku))
-            return {'media':[dict(v,type=v.get('media_type') or 'image',source_part_ids=v.get('part_ids') or []) for v in r.get('unique_media',[])]}
+
+            # PromoStandards ProductData exposes a primary image separately
+            # from MediaService. Merge it so the supplier's complete gallery
+            # is represented in SupplierHub.
+            # ProductData is an optional enrichment for MediaService. A temporary
+            # ProductData failure must not discard images returned by MediaService.
+            try:
+                product = self.parsed(sku)
+            except Exception:
+                product = {}
+            parsed = parse_media(self.client.get_media_raw(sku))
+            media_rows = [
+                dict(
+                    item,
+                    type=str(item.get('media_type') or 'image').lower(),
+                    source_part_ids=item.get('part_ids') or [],
+                    is_primary=False,
+                )
+                for item in parsed.get('unique_media', [])
+            ]
+
+            primary_url = str(product.get('primary_image_url') or '').strip()
+            if primary_url.startswith(('https://', 'http://')):
+                existing = next(
+                    (item for item in media_rows if item.get('url') == primary_url),
+                    None,
+                )
+                if existing:
+                    existing['is_primary'] = True
+                    # The gallery is ordered with the primary image first.
+                    media_rows.remove(existing)
+                    media_rows.insert(0, existing)
+                else:
+                    media_rows.insert(0, {
+                        'url': primary_url,
+                        'type': 'image',
+                        'media_type': 'image',
+                        'source_part_ids': [],
+                        'is_primary': True,
+                        'class_types': [],
+                        'file_size': None,
+                        'single_part': None,
+                        'change_timestamp': None,
+                        'part_ids': [],
+                    })
+
+            # Preserve supplier order while preventing the primary image from
+            # being inserted twice when both services return the same URL.
+            unique_rows = []
+            seen_urls = set()
+            for item in media_rows:
+                url = str(item.get('url') or '').strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                unique_rows.append(item)
+            return {'media': unique_rows}
         return self.result(work)
 
 def make_connector(supplier):

@@ -14,3 +14,20 @@ test('distinct parcel measurements remain distinct',()=>{const rows=[1,2].map(we
 test('result messages show useful text without raw JSON',()=>{assert.deepEqual(ui.resultMessages({details:{error:'Token expired'},images:{message:'{"message":"Image not found"}'},duplicate:{message:'Token expired'},debug:{id:'internal-id'}}),['Token expired','Image not found']);});
 test('completed sync dock disappears even if detail is stale',()=>{assert.equal(progress.progressJob([{id:'a',status:'completed'}],{id:'a',status:'running'}),null);});
 test('hidden sync stays hidden and unknown progress stays unknown',()=>{assert.equal(progress.progressJob([{id:'a',status:'running'}],null,['a']),null);assert.equal(progress.progressPercent({total:4}),null);assert.equal(progress.progressPercent({total:4,counts:{details_processed:4,finished:2}}),75);});
+
+test('image groups deduplicate identical bytes even when supplier URLs differ',()=>{
+  const rows=[
+    {url:'https://cdn.example.test/front-a.jpg',image_sha256:'same-digest',source_color:'Dark Green'},
+    {url:'https://cdn.example.test/front-b.jpg',image_sha256:'same-digest',source_color:'Dark Green'},
+    {url:'https://cdn.example.test/back.jpg',image_sha256:'different-digest',source_color:'Dark Green'},
+    {url:'https://cdn.example.test/other.jpg',source_color:'Dark Green'},
+  ];
+  const groups=ui.groupImages(rows,[]);
+  assert.equal(groups.length,1);
+  assert.equal(groups[0].images.length,3);
+  assert.deepEqual(groups[0].images.map(image=>image.url),[
+    'https://cdn.example.test/front-a.jpg',
+    'https://cdn.example.test/back.jpg',
+    'https://cdn.example.test/other.jpg',
+  ]);
+});

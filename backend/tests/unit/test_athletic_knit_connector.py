@@ -24,6 +24,7 @@ def make_connector():
     connector.cache = {}
     connector.discovery_limit = 1500
     connector.client = FakeAthleticClient()
+    connector.parsed = lambda sku: {}
     return connector
 
 
@@ -110,10 +111,37 @@ def test_media_connector_preserves_part_associations():
         "single_part": None,
         "change_timestamp": None,
         "part_ids": ["AK-100-BLK-M"],
-        "type": "Image",
+        "type": "image",
         "source_part_ids": ["AK-100-BLK-M"],
+        "is_primary": False,
     }]
 
+
+
+def test_media_connector_uses_media_service_when_product_data_fails():
+    connector = make_connector()
+    def unavailable_product_data(sku):
+        raise RuntimeError("ProductData temporarily unavailable")
+    connector.parsed = unavailable_product_data
+    connector.client.get_media_raw = lambda sku: """
+    <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+      xmlns:media="http://www.promostandards.org/WSDL/MediaService/1.0.0/"
+      xmlns:shared="http://www.promostandards.org/WSDL/MediaService/1.0.0/SharedObjects/">
+      <soap:Body><media:GetMediaContentResponse>
+        <media:MediaContent>
+          <shared:productId>AK-100</shared:productId>
+          <shared:partId>AK-100-BLK-M</shared:partId>
+          <media:url>https://cdn.example.test/ak100-black.jpg</media:url>
+          <shared:mediaType>Image</shared:mediaType>
+        </media:MediaContent>
+      </media:GetMediaContentResponse></soap:Body>
+    </soap:Envelope>
+    """
+    result = connector.get_media("AK-100")
+    assert result["success"] is True
+    assert [item["url"] for item in result["media"]] == [
+        "https://cdn.example.test/ak100-black.jpg"
+    ]
 
 
 def test_product_category_preserves_athletic_knit_subcategory():
@@ -169,3 +197,45 @@ def test_product_title_does_not_duplicate_athletic_knit_prefix():
 
     assert result["success"] is True
     assert result["product"]["product_name"] == "Athletic Knit Hockey Jersey"
+
+
+
+def test_media_connector_includes_product_data_primary_image_without_duplicate_urls():
+    connector = make_connector()
+    connector.parsed = lambda sku: {
+        "primary_image_url": "https://cdn.example.test/ak100-primary.jpg",
+    }
+    connector.client.get_media_raw = lambda sku: """
+    <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+      xmlns:media="http://www.promostandards.org/WSDL/MediaService/1.0.0/"
+      xmlns:shared="http://www.promostandards.org/WSDL/MediaService/1.0.0/SharedObjects/">
+      <soap:Body><media:GetMediaContentResponse>
+        <media:MediaContent>
+          <shared:productId>AK-100</shared:productId>
+          <media:url>https://cdn.example.test/ak100-front.jpg</media:url>
+          <shared:mediaType>Image</shared:mediaType>
+        </media:MediaContent>
+        <media:MediaContent>
+          <shared:productId>AK-100</shared:productId>
+          <media:url>https://cdn.example.test/ak100-primary.jpg</media:url>
+          <shared:mediaType>Image</shared:mediaType>
+        </media:MediaContent>
+        <media:MediaContent>
+          <shared:productId>AK-100</shared:productId>
+          <media:url>https://cdn.example.test/ak100-back.jpg</media:url>
+          <shared:mediaType>Image</shared:mediaType>
+        </media:MediaContent>
+      </media:GetMediaContentResponse></soap:Body>
+    </soap:Envelope>
+    """
+
+    result = connector.get_media("AK-100")
+
+    assert result["success"] is True
+    assert [item["url"] for item in result["media"]] == [
+        "https://cdn.example.test/ak100-primary.jpg",
+        "https://cdn.example.test/ak100-front.jpg",
+        "https://cdn.example.test/ak100-back.jpg",
+    ]
+    assert result["media"][0]["is_primary"] is True
+    assert sum(item["url"].endswith("ak100-primary.jpg") for item in result["media"]) == 1

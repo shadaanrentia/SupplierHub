@@ -295,12 +295,43 @@ async def get_product(
             product_id
         )
         media = []
+        seen_image_hashes = {}
         for row in media_rows:
             item = row_to_dict(row)
             item['stored_locally'] = bool(item.get('image_base64'))
             item['local_url'] = '/api/media/' + str(item['id']) + '/content' if item.get('media_type') == 'image' else None
             # Images are served by the image endpoint, not repeated in detail JSON.
-            item.pop('image_base64', None)
+            image_bytes = item.pop('image_base64', None)
+            if item.get('media_type') == 'image' and image_bytes:
+                import base64
+                import hashlib
+                try:
+                    raw = str(image_bytes)
+                    raw = raw.split(',', 1)[-1] if raw.startswith('data:') else raw
+                    digest = hashlib.sha256(base64.b64decode(raw, validate=True)).hexdigest()
+                except (ValueError, TypeError):
+                    digest = None
+                if digest:
+                    item['image_sha256'] = digest
+                    previous = seen_image_hashes.get(digest)
+                    if previous is not None:
+                        # Keep one visible image but merge source associations from
+                        # byte-identical files. Do not delete DB rows or their references.
+                        parts = item.get('source_part_ids') or []
+                        prior_parts = previous.get('source_part_ids') or []
+                        if isinstance(parts, str):
+                            try: parts = json.loads(parts)
+                            except (TypeError, ValueError): parts = []
+                        if isinstance(prior_parts, str):
+                            try: prior_parts = json.loads(prior_parts)
+                            except (TypeError, ValueError): prior_parts = []
+                        previous['source_part_ids'] = list(dict.fromkeys(
+                            [str(value) for value in prior_parts + parts]
+                        ))
+                        if not previous.get('source_color') and item.get('source_color'):
+                            previous['source_color'] = item['source_color']
+                        continue
+                    seen_image_hashes[digest] = item
             media.append(item)
         settings = await conn.fetchrow(
             """

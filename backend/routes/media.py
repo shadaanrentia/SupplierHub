@@ -158,28 +158,42 @@ async def cache_product_images(product_id, media_id=None):
     on failures, and existing URLs/variant associations are not changed.
     """
     import base64
+    import hashlib
     import deps
     async with deps.pool.acquire() as conn:
-        rows = await conn.fetch("""SELECT id,url,
+        await conn.execute("ALTER TABLE product_media ADD COLUMN IF NOT EXISTS image_sha256 TEXT")
+        rows = await conn.fetch("""SELECT id,url,image_base64,image_sha256,
             COALESCE(image_base64,'')<>'' AS stored
             FROM product_media WHERE product_id=$1 AND media_type='image'
             AND ($2::text IS NULL OR id=$2)
             ORDER BY is_primary DESC,created_at""", product_id, media_id)
 
     async def save(row):
-        if row['stored']:
-            return 'cached', ''
         url = str(row['url'] or '').strip()
         try:
+            if row['stored']:
+                encoded = str(row['image_base64'] or '')
+                raw = encoded.split(',', 1)[-1] if encoded.startswith('data:') else encoded
+                content = base64.b64decode(raw, validate=True)
+                digest = hashlib.sha256(content).hexdigest()
+                if row['image_sha256'] != digest:
+                    async with deps.pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE product_media SET image_sha256=$2 WHERE id=$1",
+                            row['id'], digest,
+                        )
+                return 'cached', ''
             validate_url(url)
             # A previous download can be shared across size/colour variants.
             cached = cache_get(url)
             content, kind = cached or await fetch_image(url)
             encoded = 'data:' + kind + ';base64,' + base64.b64encode(content).decode('ascii')
+            digest = hashlib.sha256(content).hexdigest()
             async with deps.pool.acquire() as conn:
-                await conn.execute("""UPDATE product_media SET image_base64=$3
+                await conn.execute("""UPDATE product_media
+                    SET image_base64=$3,image_sha256=$4
                     WHERE id=$1 AND url=$2 AND COALESCE(image_base64,'')=''""",
-                    row['id'],url,encoded)
+                    row['id'],url,encoded,digest)
             return 'downloaded', ''
         except HTTPException as exc:
             return 'failed', str(exc.detail)

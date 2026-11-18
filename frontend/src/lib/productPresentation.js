@@ -86,8 +86,10 @@ export function groupImages(media, variants = []) {
   for (const item of media || []) {
     if (item.media_type && item.media_type !== "image") continue;
     const url = String(item.url || item.local_url || "").trim();
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
+    const contentHash = String(item.image_sha256 || item.content_sha256 || "").trim().toLowerCase();
+    const identity = contentHash ? `sha256:${contentHash}` : `url:${url}`;
+    if (!url || seen.has(identity)) continue;
+    seen.add(identity);
     let colour = cleanColour(item.source_color || item.color);
     if (!colour) {
       const parts = jsonValue(item.source_part_ids, []);
