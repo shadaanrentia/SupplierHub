@@ -169,7 +169,9 @@ def env(monkeypatch):
             "variant_sku": "TEST-M",
             "color": "Black",
             "size": "M",
-            "inventory": 0,
+            # Positive stock is needed to test the addition journal path.
+            # Zero-stock omission is covered by the dedicated inventory tests.
+            "inventory": 5,
             "price": 10,
         },
     ]

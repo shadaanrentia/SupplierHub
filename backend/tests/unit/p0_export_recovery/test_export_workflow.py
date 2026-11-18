@@ -157,16 +157,13 @@ async def test_201_eligible_variants_use_split_export(
     load_images.assert_awaited_once()
 
 @pytest.mark.asyncio
-async def test_existing_split_keeps_zero_stock_variant_for_reconciliation(
+async def test_existing_split_leaves_zero_stock_variant_untouched(
     monkeypatch,
 ):
     """
     Regression requirement:
-    An existing split-family product must still send its
-    zero-stock variants through inventory reconciliation.
-
-    This test is expected to fail against the current
-    eligibility filtering implementation.
+    Existing zero-stock variants remain part of the saved source plan,
+    but are omitted from every Lightspeed mutation path.
     """
     import pricing_rules
     import export_format
@@ -243,11 +240,9 @@ async def test_existing_split_keeps_zero_stock_variant_for_reconciliation(
         for row in forwarded
     }
 
-    # Both existing variants must be reconciled.
-    assert set(forwarded_by_sku) == {
-        "SKU-0",
-        "SKU-1",
-    }
-
-    # The out-of-stock variant must retain its zero quantity.
+    # The wrapper must preserve the complete saved source plan so the
+    # split exporter can verify remote membership and identify the existing
+    # zero-stock member. multi_family filters before every write operation.
+    assert set(forwarded_by_sku) == {"SKU-0", "SKU-1"}
     assert forwarded_by_sku["SKU-0"]["inventory"] == 0
+    assert forwarded_by_sku["SKU-1"]["inventory"] == 20

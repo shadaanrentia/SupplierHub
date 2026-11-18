@@ -50,16 +50,19 @@ async def export_families(ls, product, variants, images, markup, category_id):
     from export_format import assert_service_compatible
     assert_service_compatible(ls)
     from export_safety import decode, validate_prices, LIMIT
-    from sku_eligibility import eligibility_reason
-    validate_prices(product, variants)
+    from sku_eligibility import eligibility_reason, invalid_inventory, lightspeed_sync_eligible_variants
+    # Keep every active supplier row for saved-plan and remote-ownership checks.
+    # Only the positive-stock, valid-price subset may be written to Lightspeed.
+    all_variants = [dict(v) for v in variants if v.get('is_active') is not False]
+    for variant in all_variants:
+        if invalid_inventory(variant.get('inventory')):
+            raise ValueError('Missing or invalid variant inventory: ' + sku(variant))
+    write_variants = lightspeed_sync_eligible_variants(all_variants)
+    if not write_variants:
+        raise ValueError('No variants are eligible for Lightspeed: valid positive pricing and inventory are required')
+    validate_prices(product, write_variants)
     if not defer_images.get() and not any(i.get('media_type','image') == 'image' and (i.get('url') or i.get('image_base64')) for i in images):
         raise ValueError('No usable source images; refresh supplier media')
-    for variant in variants:
-        try:
-            quantity = float(variant.get('inventory'))
-            if not math.isfinite(quantity) or quantity < 0: raise ValueError()
-        except (TypeError,ValueError,OverflowError):
-            raise ValueError('Missing or invalid variant inventory: '+sku(variant))
     key, domain = product['id'], ls.domain_prefix
     started=time.perf_counter()
     completed, warnings = [], []
@@ -70,10 +73,12 @@ async def export_families(ls, product, variants, images, markup, category_id):
         current = None
         try:
             from pricing_rules import prepare_export_pricing, variant_retail
-            product, variants, markup = await prepare_export_pricing(conn, product, variants, markup)
+            product, write_variants, markup = await prepare_export_pricing(conn, product, write_variants, markup)
+            write_by_id = {str(v['id']): v for v in write_variants}
+            variants_by_id = {str(v['id']): v for v in all_variants}
             groups = [dict(r) for r in await conn.fetch('SELECT * FROM lightspeed_export_groups WHERE product_id=$1 AND store_domain=$2 ORDER BY group_number', key, domain)]
             ids = [str(i) for g in groups for i in decode(g['variant_ids'])]
-            if not groups or len(ids) != len(set(ids)) or set(ids) != {str(v['id']) for v in variants}:
+            if not groups or len(ids) != len(set(ids)) or set(ids) != {str(v['id']) for v in all_variants}:
                 raise ValueError('Review and save a plan covering every eligible variant exactly once')
             if any(g.get('export_mode') not in ('size_families','colour_families') for g in groups):
                 raise ValueError('Old shared-family plan: use Verify deleted destinations, then preview and save size families')
@@ -85,7 +90,6 @@ async def export_families(ls, product, variants, images, markup, category_id):
             # Read-only recovery preflight. Resolve saved destinations, uncertain
             # creations, remote membership and addition journals before image
             # validation. This phase must never POST or mutate Lightspeed.
-            variants_by_id = {str(v['id']): v for v in variants}
             preflight_destinations = {}
             for planned_group in groups:
                 planned_ids = [str(i) for i in decode(planned_group['variant_ids'])]
@@ -140,7 +144,13 @@ async def export_families(ls, product, variants, images, markup, category_id):
                     raise ValueError('Previous creation outcome cannot be verified; no duplicate creation sent')
                 if planned_family:
                     remote = members(planned_family)
-                    missing = [v for v in planned_batch if sku(v) not in remote]
+                    # Only eligible variants can be candidates for a remote
+                    # addition. An absent zero-stock SKU is intentionally left
+                    # alone and must not enter duplicate-addition recovery.
+                    missing = [
+                        v for v in planned_batch
+                        if sku(v) not in remote and str(v['id']) in write_by_id
+                    ]
                     if len(remote) + len(missing) > LIMIT:
                         raise ValueError(f'Family would exceed the maximum of {LIMIT} variants')
                     for variant in missing:
@@ -157,13 +167,12 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 }
 
             from media_links import prepare_variant_images
-            images, missing_image_skus = prepare_variant_images(images, variants, product.get('supplier_sku'))
+            images, missing_image_skus = prepare_variant_images(images, write_variants, product.get('supplier_sku'))
             if missing_image_skus:
                 raise ValueError('Verified individual images are required before export; missing: ' + ', '.join(missing_image_skus[:20]))
 
             # Validate every not-yet-created family before any Lightspeed
             # metadata or product writes. Existing destinations retain zero stock.
-            variants_by_id = {str(v['id']): v for v in variants}
             for planned_group in groups:
                 if (
                     planned_group.get('lightspeed_product_id')
@@ -192,8 +201,9 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 current = group
                 group_started=time.perf_counter()
                 selected = {str(i) for i in decode(group['variant_ids'])}
-                batch = sort_variants([dict(v) for v in variants if str(v['id']) in selected])
-                if not 0 < len(batch) <= LIMIT: raise ValueError(f'Each family must contain 1–{LIMIT} eligible variants')
+                batch = sort_variants([dict(v) for v in all_variants if str(v['id']) in selected])
+                if not 0 < len(batch) <= LIMIT: raise ValueError(f'Each family must contain 1–{LIMIT} planned variants')
+                write_batch = sort_variants([dict(write_by_id[str(v['id'])]) for v in batch if str(v['id']) in write_by_id])
                 name = family_name(product, group, batch)
                 destination = group.get('lightspeed_product_id')
                 # A stored, live destination is reconciled by member IDs and exact SKUs,
@@ -232,7 +242,9 @@ async def export_families(ls, product, variants, images, markup, category_id):
                         details = ', '.join(f'{variant_sku}: {reason}' for variant_sku, reason in blocked[:10])
                         raise ValueError('Cannot recreate a Lightspeed family with ineligible variants: ' + details)
                     from deps import calculate_sale_price
-                    cost = min(float(v['price']) for v in batch)
+                    if len(write_batch) != len(batch):
+                        raise ValueError('New Lightspeed families require valid positive-stock variants')
+                    cost = min(float(v['price']) for v in write_batch)
                     payload = dict(product, product_name=name, supplier_sku=group['export_sku'], category_id=category_id, effective_markup_percentage=markup)
                     if len(batch) == 1:
                         # Legacy creation treats a single variant as STANDARD and loses its source SKU.
@@ -244,7 +256,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
                         ids = (created.get('data') or {}).get('product_ids') or []
                         destination = ids[0] if len(ids) == 1 else None
                     else:
-                        created = await ls._create_product(payload,batch,cost,min(variant_retail(v,markup) for v in batch),supplier,brand)
+                        created = await ls._create_product(payload,write_batch,cost,min(variant_retail(v,markup) for v in write_batch),supplier,brand)
                         destination = (created.get('_existing_product_id') or created.get('id')) if isinstance(created,dict) else created
                     if not destination: raise ValueError('Creation returned no destination ID; reconcile before retrying')
                     destination = str(destination)
@@ -254,7 +266,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
                     if family.get('name') != name or not set(members(family)).issubset({sku(v) for v in batch}):
                         raise ValueError('Created family readback did not match reviewed group')
                 remote = members(family)
-                missing = [v for v in batch if sku(v) not in remote]
+                missing = [v for v in write_batch if sku(v) not in remote]
                 if len(remote) + len(missing) > LIMIT: raise ValueError(f'Family would exceed the maximum of {LIMIT} variants')
                 if missing:
                     for v in missing:
@@ -269,7 +281,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
                     remote = members(family)
                 # Only clear uncertain addition records after confirming the
                 # complete reviewed SKU set in the remote destination.
-                expected_skus = {sku(v) for v in batch}
+                expected_skus = {sku(v) for v in batch if sku(v) in remote or str(v['id']) in write_by_id}
                 if set(remote) != expected_skus:
                     raise ValueError('Family variants do not exactly match the reviewed selection')
 
@@ -287,12 +299,15 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 )
 
                 family = await asyncio.to_thread(ls.update_family_metadata,destination,name,category_id,brand,product.get('description'),remote_snapshot=family)
-                await ls._sync_existing_variants(destination,batch,0,name,supplier,True,markup,remote_snapshot=family)
+                if write_batch:
+                    await ls._sync_existing_variants(destination,write_batch,0,name,supplier,True,markup,remote_snapshot=family)
                 await conn.execute("UPDATE lightspeed_export_groups SET state='images_pending',message='Variants, prices and inventory confirmed; syncing images',updated_at=NOW() WHERE id=$1",group['id'])
                 # Write channels per member, then verify the whole family once.
                 activation_slots = asyncio.Semaphore(6)
+                write_skus = {sku(v) for v in write_batch}
                 activation_members = [m for m in members(family).values()
-                    if not (isinstance(m.get('active'),dict) and m['active'].get('in_store') is True and m['active'].get('ecwid') is True)]
+                    if sku(m) in write_skus
+                    and not (isinstance(m.get('active'),dict) and m['active'].get('in_store') is True and m['active'].get('ecwid') is True)]
                 async def activate_member(member):
                     async with activation_slots:
                         if not await asyncio.to_thread(ls._activate_online_store_product,str(member['id'])):
@@ -304,7 +319,7 @@ async def export_families(ls, product, variants, images, markup, category_id):
                 if activation_members:
                     confirmed=await asyncio.to_thread(ls.remote_family,destination)
                     confirmed_members=members(confirmed)
-                    if set(confirmed_members)!={sku(v) for v in batch}:
+                    if set(confirmed_members)!={sku(v) for v in batch if sku(v) in remote or str(v['id']) in write_by_id}:
                         raise ValueError('Family membership changed during channel verification')
                     # Some API representations omit channel fields. Fetch only
                     # those members rather than treating an omitted field as false.
@@ -319,13 +334,14 @@ async def export_families(ls, product, variants, images, markup, category_id):
                         member['active']=row.get('active')
                     await asyncio.gather(*(fill_missing_channels(m) for m in confirmed_members.values()))
                     unconfirmed=[m.get('sku') for m in confirmed_members.values()
-                        if not (isinstance(m.get('active'),dict) and m['active'].get('in_store') is True and m['active'].get('ecwid') is True)]
+                        if sku(m) in write_skus
+                        and not (isinstance(m.get('active'),dict) and m['active'].get('in_store') is True and m['active'].get('ecwid') is True)]
                     if unconfirmed: raise ValueError('POS/eCommerce activation not confirmed for: '+', '.join(str(s) for s in unconfirmed[:5]))
                     family=confirmed
                 import logging
                 logging.getLogger(__name__).info('Export family %s: metadata, stock and channels took %.1fs; starting images',group['group_number'],time.perf_counter()-group_started)
                 completed.append(destination)
-                result = await repair_assets(ls,destination,images,variants=batch,remote_snapshot=family)
+                result = await repair_assets(ls,destination,images,variants=write_batch,remote_snapshot=family)
                 pending = result['failed'] or result['uncertain']
                 text = '; '.join(result['messages'])[:1500] if pending else 'Family, variant prices, inventory and images synchronized'
                 await conn.execute("UPDATE lightspeed_export_groups SET state=$2,message=$3,updated_at=NOW() WHERE id=$1",group['id'],'images_pending' if pending else 'done',text)

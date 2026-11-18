@@ -102,6 +102,12 @@ def attribute_order(family, attr_map):
 async def export_one_family(ls, product, variants, images, markup, category_id):
     """Called only for saved batches/oversized products; normal products keep their existing path."""
     from export_safety import validate_prices, decode, export_name
+    from sku_eligibility import lightspeed_sync_eligible_variants
+    # This function also writes to Lightspeed directly; never reconcile
+    # zero-stock or invalid-price source variants.
+    variants = lightspeed_sync_eligible_variants(variants)
+    if not variants:
+        raise ValueError('No variants are eligible for Lightspeed: valid positive pricing and inventory are required')
     if len(variants) > 200:
         raise ValueError(f'Lightspeed permits at most 200 variants per family; this product has {len(variants)} eligible variants. Select at most 200 or use separate families. Batching does not bypass this limit.')
     from media_links import normalize_colour_label

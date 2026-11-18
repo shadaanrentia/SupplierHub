@@ -174,13 +174,23 @@ class Athletic(Adapter):
                 if price is not None:x['price']=price
                 variants.append(x)
             category,subcategory=category_fields(r.get('category'),r.get('subcategory'))
-            product=dict(product_name=r['name'],description=r.get('description') or '',brand=r.get('brand') or '',category=category,subcategory=subcategory,variants=variants,_source_metadata=r,_source_product_type='configurable' if variants else 'simple')
+            name=str(r['name']).strip(); name=name if name.casefold().startswith('athletic knit ') or name.casefold()=='athletic knit' else 'Athletic Knit '+name
+            product=dict(product_name=name,description=r.get('description') or '',brand=r.get('brand') or 'Athletic Knit',category=category,subcategory=subcategory,variants=variants,_source_metadata=r,_source_product_type='configurable' if variants else 'simple')
             costs=[v['price'] for v in variants if v.get('price')]
             if costs:product['price']=min(costs)
             return {'product':product}
         return self.result(work)
+    def pricing_parsed(self, sku):
+        from .pricing_parser import parse_configuration_and_pricing
+        return parse_configuration_and_pricing(
+            self.client.get_configuration_and_pricing_raw(sku)
+        )
+
     def get_pricing(self,sku):
-        return self.result(lambda:{'pricing':[{'part_id':v['part_id'],'prices':[dict(min_quantity=p.get('quantity_min') or 1,price=p.get('price')) for p in v.get('prices') or []]} for v in self.parsed(sku).get('variants',[])]})
+        def work():
+            data=self.pricing_parsed(sku)
+            return {'currency':data.get('currency') or 'CAD','price_type':data.get('price_type') or 'Customer','pricing':data.get('pricing',[])}
+        return self.result(work)
     def get_inventory(self,sku):
         def work():
             from .inventory_parser import parse_inventory
